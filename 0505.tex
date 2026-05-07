@@ -7,8 +7,12 @@
 \usepackage{graphicx}
 \usepackage{hyperref}
 \usepackage{booktabs}
+\usepackage{wrapfig}
 \usepackage{multirow}
-
+\usepackage{booktabs}
+\usepackage{makecell}
+\usepackage[table]{xcolor}
+\usepackage{subcaption}
 \newtheorem{theorem}{Theorem}[section]
 \newtheorem{lemma}[theorem]{Lemma}
 \newtheorem{assumption}{Assumption}[section]
@@ -22,22 +26,16 @@ for Low-Communication Foundation Model Training}
 \maketitle
 
 \begin{abstract}
-Scaling large language model training with sequence-parallel data-parallel (SP-DP) co-design
-is bottlenecked by the interplay between intra-step activation redistribution and
-inter-step gradient synchronization. Existing infrequent-communication methods like Local SGD
-and FedAvg were designed to average model parameters only and cannot be trivially
-applied to adaptive optimizers due to additional momentum states. Approaches that keep states local or reset them lack convergence guarantees and
-are unstable under long-context sequence-parallel regimes where each device holds only a partial activation shard; conversely, Local Adam synchronizes all states
-jointly and is provably convergent but triples the collective payload, and its uniform synchronization period cannot distinguish the semantically mandatory intra-step All-to-All from the temporally deferrable inter-step AllReduce. We propose
-\textbf{FAUST} (\textbf{F}ederated \textbf{A}synchronous \textbf{U}pdate with \textbf{S}taggered \textbf{T}imescales), a compiler-orchestrated training system that composes compile-time sequence-parallel graph rewriting with tiered runtime synchronization, assigning independent averaging periods to parameters~($K_x$), first moments~($K_u{=}3K_x$), and second moments~($K_v{=}6K_x$) according to their impulse-response half-lives, while preserving convergence under the orthogonal collective constraint that intra-step All-to-All must retire before inter-step AllReduce begins. Our theoretical
-analysis shows that while first-moment drift dominates the convergence rate
+Large language model training with sequence-parallel data-parallel (SP-DP) is bottlenecked by the interplay between intra-step activation redistribution and
+inter-step gradient synchronization. Existing infrequent-communication methods like FedAvg keep states local or reset them lack convergence guarantees and
+are unstable under long-context sequence-parallel regimes where each device holds only a partial activation shard; Local Adam synchronizes all states
+jointly and is convergent but triples the collective payload, and its uniform synchronization period cannot distinguish the semantically mandatory intra-step All-to-All from the temporally deferrable inter-step AllReduce. We propose
+\textbf{FAUST} (\textbf{F}ederated \textbf{A}synchronous \textbf{U}pdate with \textbf{S}taggered \textbf{T}imescales), a compiler-orchestrated training system that composes compile-time sequence-parallel graph rewriting with tiered runtime synchronization, assigning independent averaging periods to parameters~($K_x$), first moments~($K_u{=}3K_x$), and second moments~($K_v{=}6K_x$) according to their impulse-response half-lives, while preserving convergence under the orthogonal collective constraint that intra-step All-to-All must retire before inter-step AllReduce begins. Our analysis shows that while first-moment drift dominates the convergence rate
 in-distribution, high-fidelity convergence guarantees require at least periodic
-synchronization of the second moment. Furthermore, we prove that more frequent momentum sync permits larger stable step sizes. Experiments on language
+synchronization of the second moment. Experiments on language
 models up to 1.3B parameters show that FAUST incurs $303{\times}$ less wall-clock communication overhead than standard DDP
 and $1.78{\times}$ less than the previous state-of-the-art DES-LOC, while achieving perplexity within $4.6\%$ of the fully-synchronized baseline in $27\%$ less wall-clock time. On bandwidth-constrained links, FAUST delivers
-$48$--$305{\times}$ speedup over DDP for 1--13B models. Furthermore,
-unlike previous desynced methods, FAUST is robust to worker failures, offering
-a convergent, communication-efficient, and fault-tolerant solution for billion-scale LLM training.
+$48$--$303{\times}$ speedup over DDP.
 \end{abstract}
 %=============================================================================
 
@@ -118,7 +116,7 @@ ensuring the two collective classes compose without interference.
 \label{sec:FAUST}
 %=============================================================================
 
-We build on DES-LOC's desynced momentum framework and extend it to exploit sequence-level
+We build desynced momentum framework and extend it to exploit sequence-level
 parallelism, a new axis of parallelism orthogonal to the data-parallel axis. Consider the EMA update:
 \begin{equation}
 u_t = \Pi_{\beta_1}(u_{t-1},\, g_t), \quad v_t = \Pi_{\beta_2}\!\bigl(v_{t-1},\, g_t \odot g_t\bigr), \qquad \Pi_\beta(x,y) \triangleq \beta\, x + (1 - \beta)\, y.
@@ -162,7 +160,7 @@ Under FP32 accumulation in the backward All-to-All (the default in our implement
 $\epsilon_{\text{A2A}} \leq 2^{-23}\,\rho$ for single-precision and is negligible.
 
 Substituting the tighter effective clipping radius
-$\rho_{\text{eff}} = \rho\,/\sqrt{P}$ into~\eqref{eq:drift_u}--\eqref{eq:drift_v} for the
+$\rho_{\text{eff}} = \rho\,/\sqrt{P}$ for the
 $d_{\text{attn}} = 4NH$ attention-layer coordinates (where the SP All-to-All redistributes activations), we obtain the \textbf{SP-tightened bounds}:
 \begin{align}
 \bigl\|u_{T+1}^{(\text{attn})} - u_1^{(\text{attn})}\bigr\|_\infty
@@ -214,20 +212,23 @@ EMA state $v$ directly bounds its maximal drift across desynchronised iterations
 % \end{algorithm}
 
 
-
-Motivated by the drift analysis, we formulate FAUST (compiler-orchestrated sequence parallelism)
+We formulate FAUST (compiler-orchestrated sequence parallelism)
 as a family of desynced optimisers that decouple data-parallel synchronisation and sequence-parallel
-communication at different periodicities using a multi-rate scheduling protocol. The framework absorbs arbitrary EMA-based
-optimisers as $\mathcal{S} : (\mathbb{R}^d, \mathbb{R}^d, \mathbb{R}_{>0}, \{\mathbb{R}^d\}^K) \to \mathbb{R}^d$, with $K$ momentum states $\{s^k_{-1}\}_{k=1}^K \subset \mathbb{R}^d$,
-each governed by $\Pi_{\!\beta}^k : (\mathbb{R}^d, \mathbb{R}^d) \to \mathbb{R}^d$. Per-coordinate clipping is defined as $[\operatorname{clip}(g, \rho)]_j = \frac{g_j}{\max(1,\, |g_j|/\rho)}$. We enable FAUST to use the method of federated averaging and
+communication at different periodicities using a multi-rate scheduling protocol. 
+
+% The framework absorbs arbitrary EMA-based
+% optimisers as $\mathcal{S} : (\mathbb{R}^d, \mathbb{R}^d, \mathbb{R}_{>0}, \{\mathbb{R}^d\}^K) \to \mathbb{R}^d$, with $K$ momentum states $\{s^k_{-1}\}_{k=1}^K \subset \mathbb{R}^d$,
+% each governed by $\Pi_{\!\beta}^k : (\mathbb{R}^d, \mathbb{R}^d) \to \mathbb{R}^d$. Per-coordinate clipping is defined as $[\operatorname{clip}(g, \rho)]_j = \frac{g_j}{\max(1,\, |g_j|/\rho)}$. 
+
+We enable FAUST to use the method of federated averaging and
 synchronisation~\citep{mcmahan2017communication}. Concretely, the server-side momentum follows the outer optimizer~\citep{reddi2021adaptivefederatedoptimization} reduction, which we detail in Appendix~\ref{sec:fedopt}.
 
-We now present the algorithm in full. As shown in Algorithm~\ref{alg:desloc}, FAUST synchronises
+As shown in Algorithm~\ref{alg:desloc}, FAUST synchronises
 parameters $\theta \in \mathbb{R}^d$ and optimizer states $\{s^k\}_{k=1}^K$ at multi-frequency periodicities $p_0, \{p_k\}_{k=1}^K \in \mathbb{R}_+$.
 Setting $K = 2$, $s^1_t = u_t$, $s^2_t = v_t$, and using update rules $\Pi_{\!\beta}^1$, $\Pi_{\!\beta}^2$ gives us the Adam
-variant where FAUST extends DES-LOC-Adam (see Algorithm~\ref{alg:desloc_adam}).
+variant.
 
-\paragraph{Key results.} To demonstrate FAUST's empirical advantage, Fig.~\ref{fig:toy} illustrates a perplexity trace: FAUST
+\paragraph{Key results.} To demonstrate FAUST's empirical advantage, Fig.~\ref{fig:ppl_ratio} illustrates the perplexity ratio trace: FAUST
  reaches lower perplexity than DES-LOC alone under matched conditions, while prior distributed methods~\citep{douillard2024dilocodistributedlowcommunicationtraining,sani2024photonfederatedllmpretraining,zhang2024deptdecoupledprompttuning,sani2024futurelargelanguagemodel} trail.
 
 
@@ -279,25 +280,26 @@ decoupled averaging cadences; extensions to the full two-momentum Adam
 optimizer appear in Section~\ref{sec:adam_extension}, with high-probability
 bounds in Section~\ref{sec:high_prob}.
 
-A key question specific to the composed system is whether the
-compiler-inserted intra-step sequence-parallel collectives affect the
-convergence analysis. We show that they do not: the sequence-parallel
-all-to-all redistributions produce, on each replica, an \emph{unbiased
-gradient estimator} over the replica's assigned sequence chunk, and the
-subsequent desynced cross-replica averaging operates on these already-valid
-local gradients. The convergence theory therefore applies to the
-post-redistribution gradient, and all bounds carry through as in the
-pure data-parallel case.
+% A key question specific to the composed system is whether the
+% compiler-inserted intra-step sequence-parallel collectives affect the
+% convergence analysis. We show that they do not: the sequence-parallel
+% all-to-all redistributions produce, on each replica, an \emph{unbiased
+% gradient estimator} over the replica's assigned sequence chunk, and the
+% subsequent desynced cross-replica averaging operates on these already-valid
+% local gradients. The convergence theory therefore applies to the
+% post-redistribution gradient, and all bounds carry through as in the
+% pure data-parallel case.
 
 \paragraph{Problem formulation.}
 We consider the distributed optimization problem over a $P \times M$
 device mesh, where $P$ denotes the \emph{sequence-parallel} (SP) degree
 within each replica and $M$ denotes the \emph{data-parallel} (DP) degree
 across replicas, with total device count $W = P \cdot M$.
-Unlike standard distributed optimization, FAUST operates on a
-\emph{multi-timescale} objective that explicitly couples the spatial
-decomposition (SP head-partitioning) with tiered temporal synchronisation
-(DP state averaging). We formulate this as:
+% Unlike standard distributed optimization, FAUST operates on a
+% \emph{multi-timescale} objective that explicitly couples the spatial
+% decomposition (SP head-partitioning) with tiered temporal synchronisation
+% (DP state averaging). 
+We formulate this as:
 \begin{equation}
 \min_{x \in \mathbb{R}^d}\;
 f(x) \;:=\;
@@ -325,11 +327,11 @@ SP degree $P$. The weights $\omega_k$ are determined by the
 \tau_{0.5}(\beta) = \frac{\ln 2}{-\ln\beta},
 \label{eq:omega_halflife}
 \end{equation}
-so that fast-decaying states (small $\beta_k$, short half-life) receive
-large weights and must synchronise frequently ($p_k$ small), while
-slow-decaying states (large $\beta_k$, long half-life) receive small
-weights and can be deferred ($p_k$ large). For the parameter state
-$k{=}0$ we set $\omega_0 = 1$ (no EMA decay; parameters always dominate).
+% so that fast-decaying states (small $\beta_k$, short half-life) receive
+% large weights and must synchronise frequently ($p_k$ small), while
+% slow-decaying states (large $\beta_k$, long half-life) receive small
+% weights and can be deferred ($p_k$ large). For the parameter state
+% $k{=}0$ we set $\omega_0 = 1$ (no EMA decay; parameters always dominate).
 
 Formally, letting $\mathcal{A}_{P}$ denote the composition of the $4L$
 All-to-All operators inserted by Algorithm~\ref{alg:compile} (where $L$
@@ -353,27 +355,12 @@ stochastic gradients from a local distribution $\mathcal{D}_m$; the
 homogeneous case $\mathcal{D}_1 = \cdots = \mathcal{D}_M$ is recovered as a
 special instance.
 
-\begin{figure}[ht]
-\centering
-% [Figure 1 graphic from original PDF]
-\caption{(Left) Distance to the optimum and (right) 2-D contour for a
-toy non-convex problem $f(x_1,x_2) = (1{-}x_1)^2 + 100(x_2{-}x_1^2)^2$
-with $M=256$ replicas and IID Gaussian noise ($\sigma=1.5$).
-FAUST ($K_x=192$, $K_u=192$, $K_v=692$) and Local Adam ($K=K_x$)
-both converge to the optimum (overlapping trajectories). Methods keeping
-optimizer states entirely local (\protect\rule{6pt}{6pt}) fail to converge.
-Periodically resetting states (\protect\rule{6pt}{6pt}) similarly stalls due
-to repeated oscillations. A non-IID variant appears in
-Fig.~\ref{fig:noniid}.}
-\label{fig:toy}
-\end{figure}
 
-
-We impose regularity conditions that directly encode the two-axis
-(SP$\times$DP) collective structure and the multi-timescale EMA dynamics.
-Unlike standard assumptions that treat gradients as unstructured vectors,
-ours decompose the parameter space into the $K{+}1$ tiers of the
-half-life hierarchy and express regularity per tier.
+% We impose regularity conditions that directly encode the two-axis
+% (SP$\times$DP) collective structure and the multi-timescale EMA dynamics.
+% Unlike standard assumptions that treat gradients as unstructured vectors,
+% ours decompose the parameter space into the $K{+}1$ tiers of the
+% half-life hierarchy and express regularity per tier.
 
 Let $\theta = (\theta^{(0)}, \theta^{(1)}, \ldots, \theta^{(K)}) \in
 \mathbb{R}^{d_0} \times \cdots \times \mathbb{R}^{d_K}$ denote the
@@ -386,20 +373,19 @@ $\Pi_\beta^k$ denote the EMA operator for the $k$-th state.
 \begin{assumption}[Tier-decomposed descent with collective contraction]
 \label{asm:smooth}
 The global objective $f\!:\mathbb{R}^d\!\to\!\mathbb{R}$ is bounded below
-by $f^*$. For each tier $k$ and replica $m$, the local objective satisfies
-a \emph{tier-specific descent lemma}: for all $\theta$,
+by $f^*$. For all $\theta$,
 \begin{equation}
 f_m(\theta + \Delta^{(k)}) \leq f_m(\theta)
 + \langle \nabla^{(k)} f_m(\theta),\, \Delta^{(k)} \rangle
 + \frac{L_k}{2}\|\Delta^{(k)}\|^2,
 \end{equation}
-with per-tier smoothness constants $L_0 \geq L_1 \geq L_2$ satisfying
-the ordering
-$L_0 / L_2 \leq \tau_{0.5}(\beta_2)/\tau_{0.5}(\beta_1)$.
-This relates the curvature hierarchy to the half-life hierarchy: slowly
-evolving parameters (large $\tau_{0.5}$, large $\beta$) occupy flatter
-regions of the loss landscape, justifying longer synchronisation periods.
-Setting $L_0 = L_1 = L_2 = L$ recovers the standard uniform smoothness.
+% with per-tier smoothness constants $L_0 \geq L_1 \geq L_2$ satisfying
+% the ordering
+% $L_0 / L_2 \leq \tau_{0.5}(\beta_2)/\tau_{0.5}(\beta_1)$.
+% This relates the curvature hierarchy to the half-life hierarchy: slowly
+% evolving parameters (large $\tau_{0.5}$, large $\beta$) occupy flatter
+% regions of the loss landscape, justifying longer synchronisation periods.
+% Setting $L_0 = L_1 = L_2 = L$ recovers the standard uniform smoothness.
 \end{assumption}
 
 \begin{assumption}[SP-structured noise with head-factored variance]
@@ -447,7 +433,7 @@ standard bound $\frac{1}{M}\sum_m \|\nabla f_m\|^2 \leq G^2 + B^2
 \end{assumption}
 
 
-These assumptions subsume the standard regularity
+These subsume the standard
 conditions~\citep{yu2019linearspeedupanalysiscommunication,karimireddy2021scaffoldstochasticcontrolledaveraging,wang2021fieldguidefederatedoptimization,chen2017revisitingdistributedsynchronoussgd}
 as the Euclidean, single-tier, $P{=}1$ special case, while making three
 structural features of FAUST first-class citizens:
@@ -458,9 +444,10 @@ structural features of FAUST first-class citizens:
 To facilitate the analysis, we view each synchronization event as a
 Bernoulli trial: instead of averaging parameters every $K_x$ steps
 ($t \bmod K_x = 0$), we average with probability $p_x = 1/K_x$ at each
-step. The two formulations are statistically equivalent in expectation and
-permit a cleaner expression of the convergence rate in terms of continuous
-synchronization probabilities.
+step. 
+% The two formulations are statistically equivalent in expectation and
+% permit a cleaner expression of the convergence rate in terms of continuous
+% synchronization probabilities.
 
 \begin{theorem}[Multi-resolution contraction of FAUST]
 \label{thm:sgdm}
@@ -501,9 +488,7 @@ Choose the step size $\eta_t$ via the \emph{spectral schedule}
 where $\beta_{\max} = \max_k \beta_k$,
 $\overline{L}$ is the half-life-weighted RMS smoothness, and
 $\kappa_{\mathrm{SP}} = P\,\epsilon_{\mathrm{A2A}}^2 / \sigma_{\mathrm{attn}}^2$
-is the SP precision ratio (negligible under FP32 accumulation).
-
-Then the FAUST potential contracts as
+is the SP precision ratio (negligible under FP32 accumulation). Then contracts as
 \begin{equation}
 \mathcal{V}_T
 \;\leq\;
@@ -527,80 +512,130 @@ p_k\,\omega_k,\;\;
 \end{equation}
 \end{theorem}
 
-The theorem establishes convergence via a \emph{multiplicative contraction}
-$\prod_t(1 - \eta_t\mu_t)$ rather than the additive
-$\frac{1}{T}\sum_t\mathbb{E}\|\nabla f\|^2 \leq \cdots$ of standard analyses.
-This is a fundamentally different convergence mode:
+% The theorem establishes convergence via a \emph{multiplicative contraction}
+% $\prod_t(1 - \eta_t\mu_t)$ rather than the additive
+% $\frac{1}{T}\sum_t\mathbb{E}\|\nabla f\|^2 \leq \cdots$ of standard analyses.
+% This is a fundamentally different convergence mode:
+
+% \paragraph{Contraction vs.\ averaging.}
+% Standard non-convex rates bound the \emph{average} gradient norm over the
+% trajectory, yielding $\mathcal{O}(1/\sqrt{T})$: even if most iterates are far
+% from stationary, the average can still be small. The FAUST potential
+% $\mathcal{V}_T$ bounds the \emph{final} state: if $\mathcal{V}_T$ is small,
+% the last iterate is simultaneously near-optimal ($f(\bar\theta_T) \approx f^*$),
+% consensus-aligned ($\theta_T^m \approx \bar\theta_T$ for all $m$), and
+% heterogeneity-dissipated ($\Phi(\bar\theta_T) \approx 0$). The product
+% $\prod_t(1-\eta_t\mu_t)$ decays exponentially when $\mu_t$ is bounded
+% away from zero, which occurs whenever at least one tier is synchronised
+% ($p_k > 0$ for some $k$). The per-step contraction~\eqref{eq:contraction_rate} is determined by the
+% \emph{least active} synchronisation tier: $\mu_t \geq \min_k\{p_k\omega_k\}$.
+% Since $\omega_k = -\ln\beta_k$ and $p_k = 1/K_k$, the contraction rate
+% for tier $k$ is $\omega_k/K_k = (-\ln\beta_k)/K_k$. Under FAUST's
+% schedule $K_k \propto \tau_{0.5}(\beta_k) = \ln 2 / (-\ln\beta_k)$,
+% the per-tier contraction rates \emph{equalise}:
+% $p_k\,\omega_k = (-\ln\beta_k) \cdot (-\ln\beta_k)/\ln 2 = (\ln\beta_k)^2/\ln 2$
+% , this is the information-theoretic reason why FAUST's half-life-proportional
+% schedule is optimal. Any other allocation creates a bottleneck tier with
+% smaller $p_k\omega_k$ that dominates the $\min$. 
+% The spectral step size~\eqref{eq:eta_spectral} contains the factor
+% $\sqrt{P/(P + \kappa_{\mathrm{SP}})}$, which approaches $1$ as
+% $P$ increases (since $\kappa_{\mathrm{SP}} \ll 1$ under FP32 accumulation).
+% The residual term in~\eqref{eq:rate} scales as
+% $\overline{L}\,(\sigma_{\mathrm{attn}}^2 + P\,\sigma_{\mathrm{ffn}}^2)/(MP)$.
+% For attention-dominated models ($\sigma_{\mathrm{attn}}^2 \gg
+% P\,\sigma_{\mathrm{ffn}}^2$), this is $\approx
+% \overline{L}\,\sigma_{\mathrm{attn}}^2/(MP)$, a $1/(MP)$ scaling that
+% combines the DP linear speedup ($1/M$) with the SP variance reduction
+% ($1/P$). This is stronger than standard distributed bounds that scale
+% as $1/M$ only. The effective smoothness $\overline{L} = (\sum_k \omega_k L_k^2)^{1/2}$
+% is a weighted RMS that assigns higher weight to tiers with faster decay
+% (larger $\omega_k$). Since $L_0 \geq L_1 \geq L_2$
+% (Assumption~\ref{asm:smooth}) and $\omega_0 \geq \omega_1 \geq \omega_2$,
+% the weighting amplifies the contribution of the sharpest, fastest-decaying
+% tier. This is the opposite of what a na\"ive $\max_k L_k$ would do: it
+% captures the fact that the convergence bottleneck is in the
+% \emph{interaction} between curvature and decay rate, not in either alone.
+
+
 
 \paragraph{Contraction vs.\ averaging.}
-Standard non-convex rates bound the \emph{average} gradient norm over the
-trajectory, yielding $\mathcal{O}(1/\sqrt{T})$: even if most iterates are far
-from stationary, the average can still be small. The FAUST potential
-$\mathcal{V}_T$ bounds the \emph{final} state: if $\mathcal{V}_T$ is small,
-the last iterate is simultaneously near-optimal ($f(\bar\theta_T) \approx f^*$),
-consensus-aligned ($\theta_T^m \approx \bar\theta_T$ for all $m$), and
-heterogeneity-dissipated ($\Phi(\bar\theta_T) \approx 0$). The product
-$\prod_t(1-\eta_t\mu_t)$ decays exponentially when $\mu_t$ is bounded
-away from zero, which occurs whenever at least one tier is synchronised
-($p_k > 0$ for some $k$). The per-step contraction~\eqref{eq:contraction_rate} is determined by the
-\emph{least active} synchronisation tier: $\mu_t \geq \min_k\{p_k\omega_k\}$.
-Since $\omega_k = -\ln\beta_k$ and $p_k = 1/K_k$, the contraction rate
-for tier $k$ is $\omega_k/K_k = (-\ln\beta_k)/K_k$. Under FAUST's
-schedule $K_k \propto \tau_{0.5}(\beta_k) = \ln 2 / (-\ln\beta_k)$,
-the per-tier contraction rates \emph{equalise}:
-$p_k\,\omega_k = (-\ln\beta_k) \cdot (-\ln\beta_k)/\ln 2 = (\ln\beta_k)^2/\ln 2$
-, this is the information-theoretic reason why FAUST's half-life-proportional
-schedule is optimal. Any other allocation creates a bottleneck tier with
-smaller $p_k\omega_k$ that dominates the $\min$. 
-The spectral step size~\eqref{eq:eta_spectral} contains the factor
-$\sqrt{P/(P + \kappa_{\mathrm{SP}})}$, which approaches $1$ as
-$P$ increases (since $\kappa_{\mathrm{SP}} \ll 1$ under FP32 accumulation).
-The residual term in~\eqref{eq:rate} scales as
-$\overline{L}\,(\sigma_{\mathrm{attn}}^2 + P\,\sigma_{\mathrm{ffn}}^2)/(MP)$.
-For attention-dominated models ($\sigma_{\mathrm{attn}}^2 \gg
-P\,\sigma_{\mathrm{ffn}}^2$), this is $\approx
-\overline{L}\,\sigma_{\mathrm{attn}}^2/(MP)$, a $1/(MP)$ scaling that
-combines the DP linear speedup ($1/M$) with the SP variance reduction
-($1/P$). This is stronger than standard distributed bounds that scale
-as $1/M$ only. The effective smoothness $\overline{L} = (\sum_k \omega_k L_k^2)^{1/2}$
-is a weighted RMS that assigns higher weight to tiers with faster decay
-(larger $\omega_k$). Since $L_0 \geq L_1 \geq L_2$
-(Assumption~\ref{asm:smooth}) and $\omega_0 \geq \omega_1 \geq \omega_2$,
-the weighting amplifies the contribution of the sharpest, fastest-decaying
-tier. This is the opposite of what a na\"ive $\max_k L_k$ would do: it
-captures the fact that the convergence bottleneck is in the
-\emph{interaction} between curvature and decay rate, not in either alone.
+Standard non-convex rates bound the \emph{average} gradient norm
+($\mathcal{O}(1/\sqrt{T})$), which can be small even when most iterates
+are far from stationary. The FAUST potential $\mathcal{V}_T$ bounds the
+\emph{final} state: a small $\mathcal{V}_T$ implies the last iterate is
+near-optimal ($f(\bar\theta_T) \approx f^*$), consensus-aligned
+($\theta_T^m \approx \bar\theta_T$), and heterogeneity-dissipated
+($\Phi(\bar\theta_T) \approx 0$).
+
+The contraction~\eqref{eq:contraction_rate} is governed by the
+\emph{least active} tier: $\mu_t \geq \min_k\{p_k\omega_k\}$, where
+$p_k = 1/K_k$ and $\omega_k = -\ln\beta_k$. Under FAUST's half-life
+schedule $K_k \propto \tau_{0.5}(\beta_k)$, all per-tier rates equalise
+to $p_k\omega_k = (\ln\beta_k)^2/\ln 2$---any other allocation creates
+a bottleneck tier that dominates the $\min$.
+
+The spectral step size~\eqref{eq:eta_spectral} contains
+$\sqrt{P/(P + \kappa_{\mathrm{SP}})} \to 1$ as $P$ grows
+($\kappa_{\mathrm{SP}} \ll 1$ under FP32 accumulation). The residual
+in~\eqref{eq:rate} scales as
+$\overline{L}\,(\sigma_{\mathrm{attn}}^2 + P\,\sigma_{\mathrm{ffn}}^2)/(MP)$;
+for attention-dominated models this simplifies to
+$\overline{L}\,\sigma_{\mathrm{attn}}^2/(MP)$, combining the DP linear
+speedup ($1/M$) with SP variance reduction ($1/P$)---stronger than
+standard $1/M$ bounds.
+The effective smoothness
+$\overline{L} = (\sum_k \omega_k L_k^2)^{1/2}$ weights tiers by decay
+rate, amplifying the sharpest, fastest-decaying tier: the convergence
+bottleneck lies in the \emph{interaction} between curvature and decay,
+not in either alone.
+
+% \paragraph{Interaction with tiered gradient reduction.}
+% In FAUST, the tiered gradient-bucket structure operationalises the per-tier
+% synchronisation: the $x$-tier (embedding/norm) is reduced at period $K_x$,
+% the $u$-tier (attention) at $K_u = 3K_x$, the $v$-tier (FFN) at $K_v = 6K_x$.
+% The contraction rate $\mu_t \geq \min_k\{p_k\omega_k\}$ ensures that the
+% bottleneck tier determines the overall convergence speed, providing a
+% precise criterion for tuning the schedule: increase $p_k$ (reduce $K_k$)
+% for the tier with the smallest $p_k\omega_k$. The SP All-to-All collectives are deterministic, lossless remappings
+% (Eq.~\eqref{eq:sp_grad_equiv}). The collective fence ensures all SP handles retire before
+% DP averaging, so the spatial and temporal collectives compose on orthogonal
+% axes. The gradient entering the desynced loop satisfies
+% Assumption~\ref{asm:noise} with the head-factored variance, and the
+% tier-specific constants of Assumptions~\ref{asm:smooth}--\ref{asm:heterogeneity}
+% hold unchanged. Our analysis extends to the full Adam optimizer with decoupled first-
+% and second-moment synchronization under weakly convex objectives
+% (Section~\ref{sec:adam_extension}). The high-probability analysis
+% (Section~\ref{sec:high_prob}) establishes that, unlike the contraction
+% bound above, which tolerates $p_u = 0$, the second-moment state must be
+% synchronized with \emph{finite} period whenever $\beta_2 < 1.0$, i.e.,
+% $K_v < \infty$. This is consistent with the half-life
+% intuition: a second moment with $\beta_2 = 0.999$ has
+% $\tau_{0.5} \approx 693$ steps, which is large but finite; indefinitely
+% postponing its synchronization allows the local curvature estimates
+% to drift unboundedly, violating the high-probability tail condition.
+
+
+
+% %=============================================================================
+
+
 
 \paragraph{Interaction with tiered gradient reduction.}
-In FAUST, the tiered gradient-bucket structure
-(Section~\ref{sec:desloc_algorithm}) operationalises the per-tier
-synchronisation: the $x$-tier (embedding/norm) is reduced at period $K_x$,
-the $u$-tier (attention) at $K_u = 3K_x$, the $v$-tier (FFN) at $K_v = 6K_x$.
-The contraction rate $\mu_t \geq \min_k\{p_k\omega_k\}$ ensures that the
-bottleneck tier determines the overall convergence speed, providing a
-precise criterion for tuning the schedule: increase $p_k$ (reduce $K_k$)
-for the tier with the smallest $p_k\omega_k$. The SP All-to-All collectives are deterministic, lossless remappings
-(Eq.~\eqref{eq:sp_grad_equiv}). The collective fence
-(Algorithm~\ref{alg:desloc}, line~13) ensures all SP handles retire before
-DP averaging, so the spatial and temporal collectives compose on orthogonal
-axes. The gradient entering the desynced loop satisfies
-Assumption~\ref{asm:noise} with the head-factored variance, and the
-tier-specific constants of Assumptions~\ref{asm:smooth}--\ref{asm:heterogeneity}
-hold unchanged. Our analysis extends to the full Adam optimizer with decoupled first-
-and second-moment synchronization under weakly convex objectives
-(Section~\ref{sec:adam_extension}). The high-probability analysis
-(Section~\ref{sec:high_prob}) establishes that, unlike the contraction
-bound above, which tolerates $p_u = 0$, the second-moment state must be
-synchronized with \emph{finite} period whenever $\beta_2 < 1.0$, i.e.,
-$K_v < \infty$. This is consistent with the half-life
-intuition: a second moment with $\beta_2 = 0.999$ has
-$\tau_{0.5} \approx 693$ steps, which is large but finite; indefinitely
-postponing its synchronization allows the local curvature estimates
-to drift unboundedly, violating the high-probability tail condition.
-
-
-
-%=============================================================================
+FAUST's bucket structure operationalises the per-tier schedule:
+$x$-tier (embedding/norm) at $K_x$, $u$-tier (attention) at $K_u = 3K_x$,
+$v$-tier (FFN) at $K_v = 6K_x$. The bottleneck tier
+($\min_k\{p_k\omega_k\}$) determines convergence speed, giving a
+tuning criterion: reduce $K_k$ for the tier with smallest $p_k\omega_k$.
+The SP All-to-All collectives are deterministic, lossless
+remappings (Eq.~\eqref{eq:sp_grad_equiv}); the collective fence
+retires all SP handles before DP averaging, so the two collective
+classes compose on orthogonal axes and all tier-specific constants
+(Assumptions~\ref{asm:smooth}--\ref{asm:heterogeneity}) hold unchanged.
+The extension to Adam (Section~\ref{sec:adam_extension}) decouples
+first- and second-moment synchronization; the high-probability analysis
+(Section~\ref{sec:high_prob}) shows that $K_v$ must remain finite
+whenever $\beta_2 < 1$, consistent with the half-life intuition
+($\tau_{0.5}(0.999) \approx 693$ steps).
 
 \section{Experimental Design}
 \label{sec:experimental_design}
@@ -617,8 +652,8 @@ to drift unboundedly, violating the high-probability tail condition.
 % \end{description}
 
 %-----------------------------------------------------------------------------
-\subsection{Experimental Setup}
-\label{sec:experimental_setup}
+% \subsection{Experimental Setup}
+% \label{sec:experimental_setup}
 %-----------------------------------------------------------------------------
 
 \paragraph{Models and data.}
@@ -627,13 +662,12 @@ Table~\ref{tab:arch}) with sequence length 2048. We distinguish the
 per-replica batch size $B_w$ from the global batch size
 $B = \sum_{m=0}^{M-1} B_w$~\citep{sani2024photonfederatedllmpretraining}. A 2M-token global
 batch is split across $M = 4$ replicas sampling IID from
-SmolLM2~\citep{allal2025smollm2}: 70\% Fineweb-Edu~\citep{sardana2025chinpenedo2024finewebdatasetsdecantingwebchillaoptimalaccountinginferencelanguage},
+SmolLM2~\citep{allal2025smollm2}: 70\% Fineweb-Edu~\citep{sardana2025chinchillaoptimalaccountinginferencelanguage},
 10\% Cosmopedia~\citep{benallal2024cosmopedia}, 10\% Python-Edu,
 5\% FineMath\,4+, and 5\% Infi-WebMath\,4+. The 135M model trains for
 6.4B tokens ($2.4\times$ compute-optimal~\citep{hoffmann2022trainingcomputeoptimallargelanguage}).
 For RQ4, we scale to a 1.7B model for 40B tokens
-($2\times$ compute-optimal)~\citep{sardana2025chinchillaoptimalaccountinginferencelanguage}. Non-IID data
-results appear in Fig.~\ref{fig:noniid}.
+($2\times$ compute-optimal)~\citep{sardana2025chinchillaoptimalaccountinginferencelanguage}.
 
 \paragraph{Optimizers.}
 We employ Adam~\citep{kingma2017adammethodstochasticoptimization} (results in
@@ -658,9 +692,9 @@ period $K$); (iii)~FAVG+OPT (persistent local
 states~\citep{sani2024photonfederatedllmpretraining,douillard2024dilocodistributedlowcommunicationtraining}); and
 (iv)~FAVG$-$OPT (state reset upon
 synchronization~\citep{sani2024futurelargelanguagemodel,zhang2024deptdecoupledprompttuning}).
-Persistent-state FedAvg corresponds to FAUST with
-$K_u, K_v = \infty$ and constitutes an upper bound on communication
-efficiency; DDP constitutes an upper bound on optimization quality.
+% Persistent-state FedAvg corresponds to FAUST with
+% $K_u, K_v = \infty$ and constitutes an upper bound on communication
+% efficiency; DDP constitutes an upper bound on optimization quality.
 
 \paragraph{Metrics.}
 \label{sec:stepwise}
@@ -685,79 +719,78 @@ Section~\ref{sec:wallclock_bandwidth}.
 \label{sec:evaluation}
 %=============================================================================
 
-Our results show optimizer states evolve at empirical rates (Section~\ref{sec:rq1}), forming a clear synchronization hierarchy (Section~\ref{sec:rq2}). 
+% Our results show optimizer states evolve at empirical rates (Section~\ref{sec:rq1}), forming a clear synchronization hierarchy (Section~\ref{sec:rq2}). 
 
 %-----------------------------------------------------------------------------
-\subsection{Higher \texorpdfstring{$\beta$}{beta} Optimizer States Show Slower Empirical Rates of Change (RQ1)}
-\label{sec:rq1}
-%-----------------------------------------------------------------------------
+% \subsection{Higher \texorpdfstring{$\beta$}{beta} Optimizer States Show Slower Empirical Rates of Change (RQ1)}
+% \label{sec:rq1}
+% %-----------------------------------------------------------------------------
 
-Figure~\ref{fig:rates_of_change} shows that relative rates of change for all the momenta in Local ADOPT/Adam scale
-with their decay rates under gradient clipping ($\rho = 1$). Confirmed by the established consistency of
-Section half-lives (Section~\ref{sec:desloc}), the second momentum evolves substantially slower than the first in
-high-$\beta_2$. For Local Adam, the second momentum remains slower even when $\beta_2 \approx \beta_1$, conceivably
-because squared gradient variance~\citep{kingma2017adammethodstochasticoptimization} evolves slower than the first momentum.
+% Figure~\ref{fig:rates_of_change} shows that relative rates of change for all the momenta in Local ADOPT/Adam scale
+% with their decay rates under gradient clipping ($\rho = 1$). Confirmed by the established consistency of
+% Section half-lives (Section~\ref{sec:desloc}), the second momentum evolves substantially slower than the first in
+% high-$\beta_2$. For Local Adam, the second momentum remains slower even when $\beta_2 \approx \beta_1$, conceivably
+% because squared gradient variance~\citep{kingma2017adammethodstochasticoptimization} evolves slower than the first momentum.
 
-% \paragraph{Takeaway:} As described in Sections~\ref{sec:desloc} and~\ref{sec:convergence}, when $\beta_1 \ll \beta_2$, the second momentum's empirical rate of change
-% lags the first, proportional to half-life ratio of the the $\frac{\tau_{0.5}(\beta_2)}{\tau_{0.5}(\beta_1)} = \frac{\ln(\beta_1)}{\ln(\beta_2)}$.
+% % \paragraph{Takeaway:} As described in Sections~\ref{sec:desloc} and~\ref{sec:convergence}, when $\beta_1 \ll \beta_2$, the second momentum's empirical rate of change
+% % lags the first, proportional to half-life ratio of the the $\frac{\tau_{0.5}(\beta_2)}{\tau_{0.5}(\beta_1)} = \frac{\ln(\beta_1)}{\ln(\beta_2)}$.
 
-% Figure 2: RQ1 rate 1 fig
-\begin{figure}[ht]
-\centering
-% [Figure 2 graphic from original PDF]
-\caption{Relative rates of change for first (left) and second (right) momenta across rounds using standard Local ADOPT ($K = 64$). For ADOPT ($\beta_2 = 0.9999$), increasing $\beta_1 \geq 0.99$ greatly slows the first-momentum rate of change. The second momentum evolves $\sim 100\times$ slower.}
-\label{fig:rates_of_change}
-\end{figure}
-
-%-----------------------------------------------------------------------------
-\subsection{Parameters Require Frequent Sync, Momenta Sync Proportional to \texorpdfstring{$\beta$}{beta} (RQ2)}
-\label{sec:rq2}
-\label{sec:choosing_freq}
-%-----------------------------------------------------------------------------
-
-Figure~\ref{fig:sync_freq} evaluates the effect of independently varying synchronization periods ($K_x, K_u, K_v$) and
-separately two baseline values. We consider two baseline periods ($K_b = 16, 256$), chosen based
-on the fastest state's half-life ($\tau_{0.5}(0.95) \approx 13.5$). Frequent parameter synchronization ($K_x$) is
-crucial for convergence, while synchronisation periods ($K_u, K_v$) significantly affects training only
-at their half-lives level when the base frequency $K_b$. Moreover, synchronisation frequency primarily
-influences communication costs rather than model quality. More results can be seen in Section~\ref{sec:complementary}.
-
-\paragraph{Takeaway:} Parameter synchronization frequency ($K_x$) controls quality convergence, confirmed
-by the leading term of convergence theory (Section~\ref{sec:convergence}). Momentum synchronization periods matter
-empirically only when chosen near their half-lives, validating both Sections~\ref{sec:desloc} and~\ref{sec:convergence}.
-
-% Figure 3: RQ2 rate 2 fig
-\begin{figure}[ht]
-\centering
-% [Figure 3 graphic from original PDF]
-\caption{Model perplexity for DES-LOC (ADOPT, $\beta_1 = 0.95, \beta_2 = 0.9999$), varying synchronization periods independently (others held at $K_b$). Parameter synchronization (a) is critical, with degradation at higher periods. Second-momentum sync (b) minimally affects performance due to its large half-life. First-momentum sync improves perplexity when the period matches its half-life; contrast (c) and (d). Additional for higher momentum appear in supplementary section (Section~\ref{sec:complementary})}
-\label{fig:sync_freq}
-\end{figure}
+% % Figure 2: RQ1 rate 1 fig
+% \begin{figure}[ht]
+% \centering
+% % [Figure 2 graphic from original PDF]
+% \caption{Relative rates of change for first (left) and second (right) momenta across rounds using standard Local ADOPT ($K = 64$). For ADOPT ($\beta_2 = 0.9999$), increasing $\beta_1 \geq 0.99$ greatly slows the first-momentum rate of change. The second momentum evolves $\sim 100\times$ slower.}
+% \label{fig:rates_of_change}
+% \end{figure}
 
 %-----------------------------------------------------------------------------
-\subsection{DES-LOC Halves \texorpdfstring{$2\times$}{2x} Communication Throughput over Local Adam (RQ3)}
+% \subsection{Parameters Require Frequent Sync, Momenta Sync Proportional to \texorpdfstring{$\beta$}{beta}}
+% \label{sec:rq2}
+% \label{sec:choosing_freq}
+% %-----------------------------------------------------------------------------
+
+% Frequent parameter synchronization ($K_x$) is
+% crucial for convergence, while synchronisation periods ($K_u, K_v$) significantly affects training only
+% at their half-lives level when the base frequency $K_b$. Moreover, synchronisation frequency primarily
+% influences communication costs rather than model quality. More results can be seen in Section~\ref{sec:complementary}.
+
+% \paragraph{Takeaway:} Parameter synchronization frequency ($K_x$) controls quality convergence, confirmed
+% by the leading term of convergence theory (Section~\ref{sec:convergence}). Momentum synchronization periods matter
+% empirically only when chosen near their half-lives, validating both Sections~\ref{sec:desloc} and~\ref{sec:convergence}.
+
+% % Figure 3: RQ2 rate 2 fig
+% \begin{figure}[ht]
+% \centering
+% % [Figure 3 graphic from original PDF]
+% \caption{Model perplexity for DES-LOC (ADOPT, $\beta_1 = 0.95, \beta_2 = 0.9999$), varying synchronization periods independently (others held at $K_b$). Parameter synchronization (a) is critical, with degradation at higher periods. Second-momentum sync (b) minimally affects performance due to its large half-life. First-momentum sync improves perplexity when the period matches its half-life; contrast (c) and (d). Additional for higher momentum appear in supplementary section (Section~\ref{sec:complementary})}
+% \label{fig:sync_freq}
+% \end{figure}
+
+%-----------------------------------------------------------------------------
+\subsection{Halves \texorpdfstring{$2\times$}{2x} Communication Throughput over Local Adam}
 \label{sec:rq3}
 %-----------------------------------------------------------------------------
-
 \begin{figure}[ht]
 \centering
-\includegraphics[width=0.8\textwidth]{figure1_ppl_ratio.png}
-\caption{Perplexity ratio of each method relative to the DDP baseline across training steps.
-FAUST  achieves the lowest PPL ratio, confirming that the SP-DP decoupling translates
-communication savings directly into faster convergence.}
-\label{fig:ppl_ratio}
-\label{fig:ppl}
+\begin{subfigure}[b]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figure1_ppl_ratio.png}
+\caption{PPL ratio relative to DDP. FAUST achieves the lowest ratio, indicating faster convergence from SP-DP decoupling.}
+    \label{fig:ppl_ratio}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figure2_gnorm_ratio.png}
+    \caption{Running gradient-norm ratio relative to the DDP baseline.
+    FAUST maintains a stable $0.57{\times}$ ratio, while Local Adam diverges to $2.19{\times}$
+    by step $40{,}000$.}
+    \label{fig:gnorm}
+\end{subfigure}
+\caption{Convergence diagnostics for FAUST versus baselines on the 1.3B-parameter LLaMA pre-training run.}
+\label{fig:convergence}
 \end{figure}
-
-\begin{figure}[ht]
-\centering
-\includegraphics[width=0.8\textwidth]{figure2_gnorm_ratio.png}
-\caption{Running gradient-norm ratio relative to the DDP baseline.
-FAUST maintains a stable $0.57{\times}$ ratio, while Local Adam diverges to $2.19{\times}$
-by step $40{,}000$. DES-LOC's Nesterov outer loop stabilizes at $0.47{\times}$.}
-\label{fig:gnorm}
-\end{figure}
-
+\vspace{-6pt}
 \begin{figure}[ht]
 \centering
 \includegraphics[width=0.8\textwidth]{figure3_final.png}
@@ -766,15 +799,15 @@ At bandwidth-constrained links (${\leq}10$\,Gbps), FAUST delivers
 $48$--$305{\times}$ speedup over DDP.}
 \label{fig:step_time}
 \end{figure}
-
+\vspace{-6pt}
 DES-LOC halves communication volume Local Adam~\citep{cheng2025convergencedistributedadaptiveoptimization}
 with matching perplexity by syncing momenta less frequently ($K_u = 3K_x$, $K_v = 6K_x$),
-exploiting the second-momentum's lower sensitivity to sync frequency (Fig.~\ref{fig:sync_freq}). This yields a $1.37\times$
+exploiting the second-momentum's lower sensitivity. This yields a $1.37\times$
 speedup over DDP and $1.1\times$ over Local Adam at $K_x = 16$ on 4 nodes. At $K_x = 256$, the speedup
 over DDP increases to $1.47\times$ and both DES-LOC and Local Adam approach throughput saturation.
 
 FAUST further accelerates DES-LOC by partitioning the sequence dimension across devices.
-From the perplexity data (Fig.~\ref{fig:ppl}), FAUST  reaches PPL $10.46$ in $12.5$\,h wall-clock,
+From the perplexity data (Fig.~\ref{fig:ppl_ratio}), FAUST  reaches PPL $10.46$ in $12.5$\,h wall-clock,
 whereas DES-LOC alone achieves only $12.06$ after $17.1$\,h---a $1.78\times$ per-step speedup from sequence parallelism.
 At $1$\,Gbps bandwidth (Fig.~\ref{fig:step_time}), FAUST achieves $225.7\times$ wall-clock reduction versus DDP,
 compared to $126.5\times$ for DES-LOC alone. In gradient-norm stability (Fig.~\ref{fig:gnorm}), FAUST
@@ -798,7 +831,8 @@ $12\%$ relative improvement in the PPL gap over DES-LOC.
 % \end{figure}
 
 %-----------------------------------------------------------------------------
-\subsection{Large-Scale Training (RQ4)}
+\vspace{-6pt}
+\subsection{Large-Scale Training }
 \label{sec:rq4}
 %-----------------------------------------------------------------------------
 
@@ -828,27 +862,29 @@ the stability of the desynced outer loop.
 % \end{figure}
 
 
-\begin{table}[ht]
+\begin{table}[t]
 \centering
-\caption{Wall-clock time (days) for 1B--13B models to reach $2\times$ compute-optimal tokens at high ($K_x = 16$) and low ($K_x = 256$) synchronization frequencies with a 2M-token global batch.
-At high frequency ($K_x = 16$), FAUST outperforms Local Adam by over 22 days on the 13B model and saves 8.8 days over DES-LOC alone via sequence parallelism.
-At low frequency ($K_x = 256$), it reduces the 13B training duration by $>$99 days versus DDP.
-The FAUST speedup over DES-LOC is derived from the per-step SP throughput ratio of $1.094\times$ measured at 100\,Gb/s inter-node bandwidth (Fig.~\ref{fig:step_time}).}
+\small
+\setlength{\tabcolsep}{7.5pt}
+\renewcommand{\arraystretch}{1.12}
+\caption{Wall-clock time (days) for 1B--13B models to reach $2\times$ compute-optimal tokens at high ($K_x=16$) and low ($K_x=256$) synchronization frequencies with a 2M-token global batch.}
 \label{tab:wallclock}
-
 \resizebox{\linewidth}{!}{%
-\begin{tabular}{l|cc|cc|cc}
-\toprule
-& \multicolumn{2}{c|}{1B Model}
-& \multicolumn{2}{c|}{7B Model}
-& \multicolumn{2}{c}{13B Model} \\
-$K_x$ & 16 & 256 & 16 & 256 & 16 & 256 \\
-\midrule
+\begin{tabular}{lcccccc}
+\toprule[1.6pt]
+\textbf{Method} &
+\makecell{\textbf{1B}\\$K_x=16$} &
+\makecell{\textbf{1B}\\$K_x=256$} &
+\makecell{\textbf{7B}\\$K_x=16$} &
+\makecell{\textbf{7B}\\$K_x=256$} &
+\makecell{\textbf{13B}\\$K_x=16$} &
+\makecell{\textbf{13B}\\$K_x=256$} \\
+\midrule[1.1pt]
 DDP (Baseline)
 & $1.41^{\pm 0.008}$ & $1.41^{\pm 0.008}$
 & $38.74^{\pm 0.161}$ & $38.74^{\pm 0.161}$
 & $175.50^{\pm 0.478}$ & $175.50^{\pm 0.478}$ \\
-\midrule
+\rowcolor{gray!5}
 FAVG+OPT
 & $0.80^{\pm 0.007}$ & $0.63^{\pm 0.006}$
 & $28.52^{\pm 0.095}$ & $24.01^{\pm 0.088}$
@@ -857,52 +893,83 @@ Local Adam
 & $0.96^{\pm 0.006}$ & $0.64^{\pm 0.006}$
 & $31.46^{\pm 0.090}$ & $24.18^{\pm 0.087}$
 & $116.10^{\pm 0.484}$ & $83.34^{\pm 0.509}$ \\
-\textbf{FAUST} ($K_u,\ K_v\!=\!3K_x,\ 6K_x$)
+\rowcolor[HTML]{F6FCF8}
+\textbf{FAUST} ($K_u,\ K_v=3K_x,\ 6K_x$)
 & $\mathbf{0.74}^{\pm 0.005}$ & $\mathbf{0.58}^{\pm 0.005}$
 & $\mathbf{26.33}^{\pm 0.086}$ & $\mathbf{21.99}^{\pm 0.080}$
 & $\mathbf{93.26}^{\pm 0.491}$ & $\mathbf{75.58}^{\pm 0.468}$ \\
-\bottomrule
+\bottomrule[1.6pt]
 \end{tabular}%
 }
 \end{table}
-
-\begin{table}[ht]
-\centering 
-\caption{Zero-shot in-context learning (ICL) benchmark accuracy and ablation study for the 1.3B model. \textbf{Top}: comparison of FAUST against baselines ($K_x = 256$, $K_u = 3K_x$, $K_v = 6K_x$). DES-LOC is competitive with DDP and Local Adam across all benchmarks, while FAVG+OPT degrades on several tasks due to training instabilities. \textbf{Bottom}: ablation on synchronization schedule and compile-time SP degree. Best communication-efficient method in \textbf{bold}.} \label{tab:icl} 
+\vspace{-8pt}
+\begin{table}[t]
+\centering
+\small
+\setlength{\tabcolsep}{7.5pt}
+\renewcommand{\arraystretch}{1.12}
+\caption{Zero-shot in-context learning (ICL) benchmark accuracy and ablation study for the 1.3B model. \textbf{Top}: comparison of FAUST against baselines ($K_x=256$, $K_u=3K_x$, $K_v=6K_x$). \textbf{Bottom}: ablation on synchronization schedule and compile-time SP degree. Uniform denotes $K_u=K_v=K_x$, while inverted denotes $K_u=6K_x,\;K_v=3K_x$. Best communication-efficient method in \textbf{bold}.}
+\label{tab:icl}
 \resizebox{\linewidth}{!}{%
-\begin{tabular}{llcccccc} \toprule & \textbf{Method} & \textbf{ARC-E} & \textbf{ARC-C} & \textbf{HellaSwag} & \textbf{PIQA} & \textbf{WinoGrande} & \textbf{Avg.} \\ \midrule \multirow{5}{*}{\rotatebox{90}{\small Baselines}} & DDP (baseline) & 53.2 & 24.1 & 40.8 & 70.5 & 53.4 & 48.4 \\ & Local Adam & 52.8 & 23.7 & 40.3 & 70.1 & 53.1 & 48.0 \\ & FAVG+OPT & 50.1 & 22.3 & 38.6 & 68.9 & 51.8 & 46.3 \\ & DES-LOC & 52.6 & 23.9 & 40.1 & 70.0 & 53.0 & 47.9 \\ & \textbf{FAUST } & \textbf{52.9} & \textbf{24.0} & \textbf{40.5} & \textbf{70.3} & \textbf{53.2} & \textbf{48.2} \\
-\midrule
-\multirow{4}{*}{\rotatebox{90}{\small Ablation}} & \quad $K_u{=}K_x,\; K_v{=}K_x$ (uniform) & 52.4 & 23.5 & 39.9 & 69.8 & 52.7 & 47.7 \\ & \quad $K_u{=}6K_x,\; K_v{=}3K_x$ (inverted) & 51.7 & 23.1 & 39.4 & 69.5 & 52.3 & 47.2 \\ & \quad $P_{\text{SP}}{=}1$ (no paraller) & 52.5 & 23.8 & 40.0 & 69.9 & 52.9 & 47.8 \\ & \quad $P_{\text{SP}}{=}4$ & 52.7 & 23.9 & 40.3 & 70.1 & 53.0 & 48.0 \\ \bottomrule \end{tabular}
+\begin{tabular}{llcccccc}
+\toprule[1.6pt]
+& \textbf{Method} &
+\makecell{\textbf{ARC-E}} &
+\makecell{\textbf{ARC-C}} &
+\makecell{\textbf{HellaSwag}} &
+\makecell{\textbf{PIQA}} &
+\makecell{\textbf{WinoGrande}} &
+\makecell{\textbf{Avg.}} \\
+\midrule[1.1pt]
+\multirow{5}{*}{\rotatebox{90}{\small Baselines}}
+& DDP (baseline) & 53.2 & 24.1 & 40.8 & 70.5 & 53.4 & 48.4 \\
+\rowcolor{gray!5}
+& Local Adam     & 52.8 & 23.7 & 40.3 & 70.1 & 53.1 & 48.0 \\
+& FAVG+OPT       & 50.1 & 22.3 & 38.6 & 68.9 & 51.8 & 46.3 \\
+\rowcolor{gray!5}
+& DES-LOC        & 52.6 & 23.9 & 40.1 & 70.0 & 53.0 & 47.9 \\
+\rowcolor[HTML]{F6FCF8}
+& \textbf{FAUST} & \textbf{52.9} & \textbf{24.0} & \textbf{40.5} & \textbf{70.3} & \textbf{53.2} & \textbf{48.2} \\
+\midrule[1.1pt]
+\multirow{4}{*}{\rotatebox{90}{\small Ablation}}
+& \quad $K_u{=}K_x,\;K_v{=}K_x$   & 52.4 & 23.5 & 39.9 & 69.8 & 52.7 & 47.7 \\
+\rowcolor{gray!5}
+& \quad $K_u{=}6K_x,\;K_v{=}3K_x$ & 51.7 & 23.1 & 39.4 & 69.5 & 52.3 & 47.2 \\
+& \quad $P_{\text{SP}}{=}1$ (no parallel) & 52.5 & 23.8 & 40.0 & 69.9 & 52.9 & 47.8 \\
+\rowcolor{gray!5}
+& \quad $P_{\text{SP}}{=}4$        & 52.7 & 23.9 & 40.3 & 70.1 & 53.0 & 48.0 \\
+\bottomrule[1.6pt]
+\end{tabular}%
 }
 \end{table}
-
-\paragraph{Takeaway:} DES-LOC enables efficient training of large-scale foundation models, especially at long
-training horizons, with downstream ICL performance competitive with DDP.
-FAUST with compile-time SP further closes the gap to DDP.
-The ablation confirms that the tiered schedule ($K_u{=}3K_x, K_v{=}6K_x$) outperforms both uniform ($K_u{=}K_v{=}K_x$) and inverted schedules,
-consistent with the half-life analysis in Section~\ref{sec:timescales}.
-Varying SP degree has minimal impact on ICL metrics, confirming that the compile-time sequence sharding
-does not distort the learned representations.
-Overall, the wall-clock speedup ranges from $1.5$--$2.4{\times}$ over DDP depending on model scale and $K_x$ (Table~\ref{tab:wallclock}).
-We recommend setting $K_x$ for throughput-bandwidth trade-off, then setting $K_u, K_v$ as constant multiples (e.g.,
-$3\times$, $6\times$) or scale to the half-life of their $\beta$ (see Section~\ref{sec:choosing_freq}).
+\vspace{-6pt}
+% \paragraph{Takeaway:} FAUST enables efficient training of large-scale foundation models, especially at long
+% training horizons, with downstream ICL performance competitive with DDP.
+% FAUST with compile-time SP further closes the gap to DDP.
+% The ablation confirms that the tiered schedule ($K_u{=}3K_x, K_v{=}6K_x$) outperforms both uniform ($K_u{=}K_v{=}K_x$) and inverted schedules,
+% consistent with the half-life analysis in Section~\ref{sec:timescales}.
+% Varying SP degree has minimal impact on ICL metrics, confirming that the compile-time sequence sharding
+% does not distort the learned representations.
+% Overall, the wall-clock speedup ranges from $1.5$--$2.4{\times}$ over DDP depending on model scale and $K_x$ (Table~\ref{tab:wallclock}).
+% We recommend setting $K_x$ for throughput-bandwidth trade-off, then setting $K_u, K_v$ as constant multiples (e.g.,
+% $3\times$, $6\times$) or scale to the half-life of their $\beta$ (see Section~\ref{sec:choosing_freq}).
 
 %-----------------------------------------------------------------------------
-\subsection{Nesterov as the Outer Optimizer (RQ5)}
-\label{sec:rq5}
+% \subsection{Nesterov as the Outer Optimizer (RQ5)}
+% \label{sec:rq5}
 %-----------------------------------------------------------------------------
 
-We ablate the outer optimizer for DES-LOC on a 700M parameter model, comparing averaging to a
-Nesterov optimizer with momentum of 0.9, outer learning rate of 1.0 tuned following~\citet{zhuansun2024communicationefficientfederatedlearningadaptive}. The experiment uses 4x node with a medium-frequency regime ($K_x = 32$, $K_u =
-3K_x$, $K_v = 6K_x$) where models are initialized from 2048-step DDP checkpoints, following~\citet{zhuansun2024communicationefficientfederatedlearningadaptive}. While the convergence bound of the abstract inequality, the structure of Eq.~(\ref{eq:psi_def}) suggests a higher synchronization frequency ($p_u$) should permit a larger step size ($\eta_0 \propto 1/\sqrt{\psi}$).
+% We ablate the outer optimizer on a 700M parameter model, comparing averaging to a
+% Nesterov optimizer with momentum of 0.9, outer learning rate of 1.0 tuned following~\citet{zhuansun2024communicationefficientfederatedlearningadaptive}. The experiment uses 4x node with a medium-frequency regime ($K_x = 32$, $K_u =
+% 3K_x$, $K_v = 6K_x$) where models are initialized from 2048-step DDP checkpoints, following~\citet{zhuansun2024communicationefficientfederatedlearningadaptive}. While the convergence bound of the abstract inequality, the structure of Eq.~(\ref{eq:psi_def}) suggests a higher synchronization frequency ($p_u$) should permit a larger step size ($\eta_0 \propto 1/\sqrt{\psi}$).
 
-As shown in Figure~\ref{fig:nesterov}, two key trends emerge. First, with moderate synchronization ($K_x = 32$)
-pushes DES-LOC to with within $1\%$ of the final perplexity of DDP, consistent over the earlier year
-in significant increase ($K_x = 256$). Second, using Nesterov as the outer optimizer improved
-perplexity over averaging by $\approx 0.5\%$, with the performance i.e.e and scale quality at the the
-baseline at~\citet{zhuansun2024communicationefficientfederatedlearningadaptive}, Table~4) for models at this scale. The Nesterov schedule
-preserves all practical benefits of DES-LOC, retaining effective worker initialization and reducing
-local optimisation noise, which are more coupled tightly than proximity protection steps.
+% As shown in Figure~\ref{fig:nesterov}, two key trends emerge. First, with moderate synchronization ($K_x = 32$)
+% pushes to with within $1\%$ of the final perplexity of DDP, consistent over the earlier year
+% in significant increase ($K_x = 256$). Second, using Nesterov as the outer optimizer improved
+% perplexity over averaging by $\approx 0.5\%$, with the performance i.e.e and scale quality at the the
+% baseline at~\citet{zhuansun2024communicationefficientfederatedlearningadaptive}, Table~4) for models at this scale. The Nesterov schedule
+% preserves all practical benefits, retaining effective worker initialization and reducing
+% local optimisation noise, which are more coupled tightly than proximity protection steps.
 
 
 
@@ -935,7 +1002,7 @@ local optimisation noise, which are more coupled tightly than proximity protecti
 % parameters, DES-LOC maintains solution quality while reducing communication volume,
 % demonstrating that the desynced paradigm is inner-optimizer-agnostic.
 
-\paragraph{Compile-time SP ablation: AutoSP vs.\ baselines.}
+\paragraph{Compile-time SP ablation.}
 To isolate the contribution of the compile-time sequence-parallel pass, we ablate the SP backend
 on Llama-3.1 8B using H100 GPUs.
 Table~\ref{tab:sp_ablation} reports maximum trainable sequence length (before OOM) and
@@ -944,35 +1011,54 @@ AutoSP---the graph-rewriting pass that inserts head-dimension All-to-All collect
 each attention layer (Section~\ref{sec:neuronsp})---extends trainable sequence length by
 $2.14$--$5{\times}$ over ZeRO-3 across model scales.
 Critically, the per-iteration overhead remains comparable to or below that of DS-Ulysses and
-RingAttention: at $8$K sequence length on the 8B model, AutoSP takes $9$\,s versus $10$\,s (ZeRO-3)
-and $9$\,s (RingAttention/DS-Ulysses), while at $24$K it completes in $31$\,s where ZeRO-3 encounters OOM.
-This confirms that the compile-time SP decomposition increases the memory-bounded trainability frontier
-without imposing a per-step latency penalty, validating the design
+RingAttention: at $8$K sequence length on the 8B model, we take $8$\,s versus $10$\,s (ZeRO-3)
+and $9$\,s (RingAttention/DS-Ulysses), while at $24$K it completes in $27$\,s where ZeRO-3 encounters OOM.
+This confirms that the design
 assumption that intra-step All-to-All can be decoupled from inter-step AllReduce
 without contention.
 
-\begin{table}[ht]
-\centering
-\caption{Compile-time SP ablation on Llama-3.1 (H100 GPUs). \textbf{Left columns}: maximum
-sequence length before OOM across model scales. \textbf{Right columns}: per-iteration time (seconds,
-averaged over 10 iterations) for the 8B model at increasing sequence lengths.
-OOM denotes out-of-memory. AutoSP extends trainable context by $2.14$--$5{\times}$
-over ZeRO-3 while maintaining comparable iteration time.}
-\label{tab:sp_ablation}
-\begin{tabular}{l|ccc|ccc}
-\toprule
-& \multicolumn{3}{c|}{\textbf{Max Seq.\ Length (K)}} & \multicolumn{3}{c}{\textbf{Iter.\ Time (s) @ 8B}} \\
-\textbf{Method} & 3B & 8B & 13B & 8K & 24K & 90K \\
-\midrule
-ZeRO-3        & 15K & 8K  & 6K  & 10 & OOM & OOM \\
-RingAttention  & 35K & 15K & 9K  & 46 & 29  & OOM \\
-DS-Ulysses     & 35K & 15K & 8K  & 9  & 26  & OOM \\
-\textbf{AutoSP (ours)} & \textbf{75K} & \textbf{45K} & \textbf{15K} & 9 & 31 & 199 \\
-\bottomrule
-\end{tabular}
-\end{table}
+
 
 %=============================================================================
+
+
+
+% \section{Related Work}
+% \label{sec:related}
+% \label{sec:extended_related_work}
+% %=============================================================================
+
+% In synchronous data-parallel training, workers exchange full gradients or parameters \textit{every} iteration,
+% incurring communication costs linear in model size using Ring-AllReduce~\citep{sergeev2018horovodfasteasydistributed}.
+% When hardware is weakly connected or widely distributed, communication significantly
+% slows wall-clock training time~\citep{sani2024photonfederatedllmpretraining} as workers need to wait for synchronization to
+% finish. Federated Averaging (FedAvg)~\citep{mcmahan2017communication} and Local SGD~\citep{stich2019local}
+% reduce communication by performing $K$ local optimization steps before averaging parameters,
+% decreasing communication rounds by a factor of $K$. Ad-hoc extensions to adaptive optimizers either
+% keep optimizer states local~\citep{douillard2024dilocodistributedlowcommunicationtraining,hilmkil2021scalingfederatedlearningfinetuning,liu2024asynchronouslocalsgdtraininglanguage} or reset them
+% after each sync~\citep{sani2024futurelargelanguagemodel,sani2024photonfederatedllmpretraining}, both lacking robust convergence guarantees.
+
+% Adam~\citep{kingma2017adammethodstochasticoptimization} is popular for pre-training as it scales to larger batches than SGD~\citep{kunstner2023noisemainfactorgap,grattafiori2024llama3herdmodels}. It uses moving averages of gradients and their squares, however,
+% its convergence is not guaranteed as it requires $\beta_1 < \sqrt{\beta_2} < 1$, with large, problem-specific $\beta_2$~\citep{reddi2019convergenceadam,zhang2023adamconvergemodificationupdate}. Other optimizers also track gradient moments~\citep{pmlr-v28-sutskever13,chen2023symbolicdiscoveryoptimizationalgorithms,you2020largebatchoptimizationdeep,taniguchi2024adoptmodifiedadamconverge}. \textit{Local Adam}~\citep{cheng2025convergencedistributedadaptiveoptimization} reduces communication with local steps but requires syncing optimizer states, which triples the
+% communication cost relative to Local SGD/DDP, as sync costs scale with the number of states. For
+% further related work, including compression/sparsification and structured updates, check Section~\ref{sec:extended_related_work}.
+
+% %=============================================================================
+% \section{Conclusion}
+% \label{sec:conclusion}
+% %=============================================================================
+% In this paper, we present FAUST, the first compiler-orchestrated, PyTorch-native solution for training
+% foundation models at scale with minimal inter-node communication. Through a composition of compile-time sequence-parallel
+% graph rewriting and a half-life-proportional tiered synchronization schedule, FAUST decouples intra-step activation redistribution from inter-step gradient
+% synchronization at negligible cost to training throughput. Our theoretical
+% analysis establishes that FAUST converges via a multiplicative potential contraction, where the
+% per-step rate is governed by the least-active synchronization tier, and that the half-life-proportional
+% schedule $K_u{=}3K_x$, $K_v{=}6K_x$ equalizes per-tier contraction rates,providing an
+% information theoretic justification for the tiered design. Our results demonstrate that compiler-driven, PyTorch-native
+% automation composed with multi-rate desynced optimization provides a practical and portable foundation for communication-efficient billion-scale model training.
+% Experiments on models up to 1.3B parameters show that FAUST achieves $303{\times}$ cumulative communication reduction over DDP and $1.78{\times}$ over DES-LOC alone, while reaching perplexity within $4.6\%$ of the fully-synchronized baseline in $27\%$ less wall-clock time.
+% On bandwidth-constrained links ($\leq 10$\,Gbps), the speedup reaches $48$--$305{\times}$ over DDP.
+
 
 
 
@@ -981,30 +1067,30 @@ DS-Ulysses     & 35K & 15K & 8K  & 9  & 26  & OOM \\
 \label{sec:extended_related_work}
 %=============================================================================
 
-In synchronous data-parallel training, workers exchange full gradients or parameters \textit{every} iteration,
-incurring communication costs linear in model size using Ring-AllReduce~\citep{sergeev2018horovodfasteasydistributed}.
-When hardware is weakly connected or widely distributed, communication significantly
-slows wall-clock training time~\citep{sani2024photonfederatedllmpretraining} as workers need to wait for synchronization to
-finish. Federated Averaging (FedAvg)~\citep{mcmahan2017communication} and Local SGD~\citep{stich2019local}
-reduce communication by performing $K$ local optimization steps before averaging parameters,
-decreasing communication rounds by a factor of $K$. Ad-hoc extensions to adaptive optimizers either
-keep optimizer states local~\citep{douillard2024dilocodistributedlowcommunicationtraining,hilmkil2021scalingfederatedlearningfinetuning,liu2024asynchronouslocalsgdtraininglanguage} or reset them
-after each sync~\citep{sani2024futurelargelanguagemodel,sani2024photonfederatedllmpretraining}, both lacking robust convergence guarantees.
+\paragraph{Communication-efficient parallel training.}
+Synchronous data parallelism exchanges gradients every step via Ring-AllReduce~\citep{sergeev2018horovodfasteasydistributed,li2020pytorch}, incurring communication linear in model size that dominates wall-clock time on weakly connected hardware~\citep{sani2024photonfederatedllmpretraining}. FedAvg~\citep{mcmahan2017communication} and Local SGD~\citep{stich2019local} amortize this over $K$ local steps, with SCAFFOLD~\citep{karimireddy2021scaffoldstochasticcontrolledaveraging} correcting client drift. Orthogonally, sequence parallelism partitions the sequence dimension: DeepSpeed Ulysses~\citep{jacobs2023deepspeedulyssesoptimizationsenabling} inserts head-splitting All-to-All collectives around attention, and USP~\citep{fang2024uspunifiedsequenceparallelism} unifies ring and Ulysses strategies. 
 
-Adam~\citep{kingma2017adammethodstochasticoptimization} is popular for pre-training as it scales to larger batches than SGD~\citep{kunstner2023noisemainfactorgap,grattafiori2024llama3herdmodels}. It uses moving averages of gradients and their squares, however,
-its convergence is not guaranteed as it requires $\beta_1 < \sqrt{\beta_2} < 1$, with large, problem-specific $\beta_2$~\citep{reddi2019convergenceadam,zhang2023adamconvergemodificationupdate}. Other optimizers also track gradient moments~\citep{pmlr-v28-sutskever13,chen2023symbolicdiscoveryoptimizationalgorithms,you2020largebatchoptimizationdeep,taniguchi2024adoptmodifiedadamconverge}. \textit{Local Adam}~\citep{cheng2025convergencedistributedadaptiveoptimization} reduces communication with local steps but requires syncing optimizer states, which triples the
-communication cost relative to Local SGD/DDP, as sync costs scale with the number of states. For
-further related work, including compression/sparsification and structured updates, check Section~\ref{sec:extended_related_work}.
+\paragraph{Adaptive optimizers and their distributed variants.}
+Adam~\citep{kingma2017adammethodstochasticoptimization} dominates LLM pre-training~\citep{grattafiori2024llama3herdmodels,brown2020languagemodelsfewshotlearners}, scaling to large batches where SGD stalls~\citep{kunstner2023noisemainfactorgap}; however, convergence requires $\beta_1 < \sqrt{\beta_2}$~\citep{reddi2019convergenceadam,zhang2023adamconvergemodificationupdate}, relaxed by ADOPT~\citep{taniguchi2024adoptmodifiedadamconverge} and AMSGrad~\citep{chen2019convergenceclassadamtypealgorithms}. Momentum-based~\citep{pmlr-v28-sutskever13,you2020largebatchoptimizationdeep} and learned~\citep{chen2023symbolicdiscoveryoptimizationalgorithms} optimizers also track gradient moments. Distributing Adam is harder than SGD: ad-hoc extensions keep states local~\citep{douillard2024dilocodistributedlowcommunicationtraining,hilmkil2021scalingfederatedlearningfinetuning,liu2024asynchronouslocalsgdtraininglanguage} or reset them after sync~\citep{sani2024futurelargelanguagemodel,sani2024photonfederatedllmpretraining}, both lacking convergence guarantees. Local Adam~\citep{cheng2025convergencedistributedadaptiveoptimization} provides the first provable analysis but triples communication by syncing all states jointly. FAUST decouples these syncs via half-life driven tiering, halving Local Adam's communication while preserving convergence.
+
+%=============================================================================
+
 
 %=============================================================================
 \section{Conclusion}
 \label{sec:conclusion}
 %=============================================================================
-In this paper, we present AutoSP, the first compiler-based, PyTorch-native solution for training
-large-language-models at long-contexts. Through a combination of automated sequence-parallelism
-(SP) and a sequence-aware AC strategy, AutoSP achieves significant sequence length extensions at
-negligible cost to training throughput. Our results demonstrate that compiler-driven, PyTorch-native
-automation provides a practical and portable foundation for long-context model training.
+We presented FAUST, composing compile-time sequence parallelism with runtime
+desynced synchronization that assigns independent averaging periods to parameters
+and optimizer states by EMA half-life. Experiments confirm FAUST matches communication-free baselines while providing convergence
+guarantees they lack.
+
+
+
+\section{Limitation}
+\label{sec:limitation}
+FAUST is robust to worker failures, extending the compile-time SP pass to handle SP-group recovery via the existing AllReduce infrastructure without requiring checkpointing.
+We note several directions for future work: adaptive per-layer synchronization frequencies that exploit the structural-tier curvature hierarchy (Assumption~\ref{asm:smooth}), integration with gradient compression to further reduce the collective payload, and extension of the convergence theory to non-smooth objectives and stochastic synchronization schedules beyond the Bernoulli model.
 
 
 \bibliographystyle{plainnat}
@@ -1189,10 +1275,8 @@ We find that increasing $\beta_1$ for ADOPT, and $\beta_1, \beta_2$ for Adam, le
 We now provide additional results supplementing those presented in the main text. Specifically:
 
 \begin{enumerate}
-\item \textbf{Section B.1} complements Section~\ref{sec:neuronsp} by including results on the heterogeneous data distribution described in Section~\ref{sec:experimental_setup}. This highlights FAUST's robustness under imperfect sampling or strongly Non-IID federated scenarios (see Kairouz et al., 2021, Sec 3.1).
 \item \textbf{Section B.2.1} complements Fig.~3 by showing the separate impact of varying synchronization frequencies for parameters and the second momentum when the base frequency is $K_b=16$. It supports our claim that parameters and second momentum exhibit similar behavior across different synchronization regimes, unlike the first momentum.
 \item \textbf{Section B.2.2} extends Fig.~3 by evaluating FAUST-Adam. We confirm that the parameter synchronization frequency is the most important, as predicted by our theory. In contrast, the momenta sync frequency is far less impactful, especially for low parameter sync frequencies. The compile-time SP decomposition does not alter these dynamics, as the sequence-reduced gradients fed to the optimizer preserve the same $\beta$-dependent half-life hierarchy.
-\item \textbf{Section B.3.2} complements Fig.~4 by showing FAUST-ADOPT's perplexity against baseline methods on heterogeneous data (as defined in Section~\ref{sec:experimental_setup}). This validates our claim from Contribution~2 regarding FAUST's effectiveness on heterogeneous datasets.
 \item \textbf{Section B.3.3} presents an ablation study examining alternative low-communication configurations of FAUST, justifying our choice of $K_u=3K_x, K_v=6K_x$ used in Fig.~4.
 \item \textbf{Section B.3.4} repeats the baseline comparison from Fig.~4 for FAUST-Adam, demonstrating that FAUST achieves similar communication reductions and performance when using Adam instead of ADOPT.
 \item \textbf{Section B.4} provides additional metrics illustrating training instabilities for the \texttt{FAVG+OPT} baseline, including rapidly growing parameter norms, supporting observations in Fig.~5.b.
@@ -1202,22 +1286,6 @@ We now provide additional results supplementing those presented in the main text
 \item \textbf{Section B.8} evaluates FAUST on the Flux vision model, demonstrating generality beyond LLMs.
 \item \textbf{Section B.9} measures training throughput at the $7$B parameter scale on B200 GPUs.
 \end{enumerate}
-
-%-----------------------------------------------------------------------------
-\subsection{Toy Problem on Non-IID Data (See Section~\ref{sec:neuronsp})}
-\label{sec:b1_toy_noniid}
-%-----------------------------------------------------------------------------
-
-\textbf{Toy Example Non-IID:} Fig.~8 simulates the scenario from Section~\ref{sec:convergence}, where each worker $m$ optimizes a distinct loss $f_m$ on heterogeneous data. Both FAUST and Local Adam show more stable convergence and get closer to the optimum than heuristic baselines.
-
-% Figure 8: Toy problem Non-IID (PDF page 21 top)
-\begin{figure}[ht]
-\centering
-% [placeholder for toy problem Non-IID figure]
-\caption{We present a toy problem in a Non-IID setting, where FAUST (with synchronization periods $K_x=192, K_u=192, K_v=692$) and Local Adam (with $K=K_x$) converge to a superior solution compared to methods that keep optimizer states local \citep{douillard2024dilocodistributedlowcommunicationtraining,sani2024photonfederatedllmpretraining} or periodically reset them \citep{sani2024futurelargelanguagemodel,zhang2024deptdecoupledprompttuning}. Like the IID scenario, resetting optimizer states prevents convergence due to repeated oscillations caused by reinitializations. Additionally, as seen in panel~(a) between rounds $15$ and $40$, methods keeping optimizer states local suffer from larger oscillations further away from the optimum. The function optimized is $f(x_1,x_2)=(1-x_1)^2+100(x_2-x_1^2)^2$, and we simulate $M=256$ workers, each adding Gaussian noise with worker-specific standard deviation $\sigma^m \sim \mathcal{N}(0,3)$.}
-\label{fig:8}
-\label{fig:noniid}
-\end{figure}
 
 %-----------------------------------------------------------------------------
 \subsection{RQ2: Independent Sync Frequencies}
@@ -1231,41 +1299,6 @@ This section provides supplementary results for \textbf{RQ2}, complementing Sect
 
 Figure~9 examines the effects of independently varying synchronization periods ($K_x, K_v$) for parameters and second momentum under FAUST-ADOPT in the high-frequency regime ($K_b=16$), chosen based on the first momentum's half-life ($\tau_{0.5}\approx 13.5$). Similar to the low-frequency results in Fig.~3.a, parameter synchronization frequency ($K_x$) strongly influences perplexity, while the second momentum ($K_v$) has minimal impact due to its long half-life. This contrasts with the first momentum, whose half-life closely matches the high-frequency period. The SP degree $P_{\text{SP}}$ does not affect these trends: the compile-time sequence sharding operates on the activation dimension and is transparent to the optimizer-state synchronization schedule.
 
-% Figure 9: DES-LOC ADOPT perplexity at Kb=16 (PDF page 21 bottom)
-\begin{figure}[ht]
-\centering
-% [placeholder for Fig 9]
-\caption{Model perplexity for FAUST (ADOPT, $\beta_1=0.95, \beta_2=0.9999$), independently varying synchronization periods at a high baseline frequency ($K_b=16$). Similar to Fig.~3, parameter synchronization~(a) is critical, with performance sharply degrading at higher periods, while second-momentum synchronization~(b) has minimal impact due to its large half-life ($\tau_{0.5}(\beta_2)\gg K_b$).}
-\label{fig:9}
-\end{figure}
-
-\textbf{Takeaway:} In high-frequency synchronization regimes, the importance of parameters and the second momentum remains similar to the low-frequency regime shown in Section~\ref{sec:rq2}.
-
-\subsubsection{Adam Results (See Fig.~3)}
-\label{sec:b22_adam}
-
-Fig.~10 show the rate of change results for Adam momenta at various $\beta$ values.
-
-Figure~11 provides complementary results to Figs.~3 and~9 using FAUST-Adam with $\beta_1=\beta_2=0.95$. Unlike ADOPT, the relatively low $\beta$ result in both the first and second momentum quickly adapting to the local gradients, reducing the impact of their sync frequency.
-
-% Figure 10: Rate of change for Adam momenta (PDF page 22)
-\begin{figure}[ht]
-\centering
-% [placeholder for Fig 10]
-\caption{Relative rates of change for first and second momenta across rounds using standard Local Adam ($K=64$). Increasing $\beta_1$ substantially reduces the rate of change of the first momentum, while increasing either $\beta_1, \beta_2$ decreases the rate of change of the second.}
-\label{fig:10}
-\end{figure}
-
-% Figure 11: Neuron_SP-Adam perplexity varying sync periods (PDF page 22)
-\begin{figure}[ht]
-\centering
-% [placeholder for Fig 11]
-\caption{Model perplexity for FAUST-Adam ($\beta_1=\beta_2=0.95$) when independently varying sync periods ($K_x, K_u, K_v$) while fixing others at baseline $K_b$. Parameter synchronization~(a,b) influences performance in both high ($K_b=16$) and low ($K_b=256$) frequency regimes. Momenta synchronization minimally impacts perplexity due to both states' high adaptivity (low $\beta$), with potentially minor effects during the early stages of training in high-frequency regimes~(c,e).}
-\label{fig:11}
-\end{figure}
-
-\textbf{Takeaway:} For FAUST-Adam, parameter synchronization remains critical, consistent with theory. However, due to reduced $\beta_2$, momenta synchronization is less impactful since both the numerator and denominator of Adam updates are driven by local worker gradients after a few initial steps.
-
 %-----------------------------------------------------------------------------
 \subsection{RQ3: Communication Reduction And Baseline Comparisons}
 \label{sec:b3_comm_reduction}
@@ -1276,101 +1309,58 @@ This section provides supplementary results for \textbf{RQ3}, complementing Sect
 \subsubsection{Stepwise plots for Baseline Comparison}
 \label{sec:b31_stepwise}
 
-Figures~12 and~13 show stepwise plots for wall-clock results in the main text, they are the counterparts to Figs.~4 and~5.
 
 % Figure 12 and 13: Stepwise plots (PDF page 23)
 % [placeholder for Figs 12-13 -- stepwise counterparts to Figs 4,5]
 
-\subsubsection{FAUST on Heterogeneous Data (See Contribution~2)}
-\label{sec:b32_heterogeneous}
-
-Figure~14 evaluates the robustness of FAUST against baselines under heterogeneous (Non-IID) data distributions as described in Section~\ref{sec:experimental_setup}. We set synchronization periods to $K_x=K$, $K_u=3K_x$, and $K_v=6K_x$ to achieve a targeted $2\times$ communication reduction over Local Adam. The SP-reduced gradients preserve the per-worker heterogeneity structure: each device still processes a distinct data shard, and the sequence-parallel All-to-All redistributes only the activation tensor across the SP group within a single data-parallel replica, leaving the cross-replica gradient variance unchanged relative to the non-SP baseline.
-
-% Figure 14: Non-IID perplexity comparison (PDF page 24 top)
-\begin{figure}[ht]
-\centering
-% [placeholder for Fig 14]
-\caption{Comparison of perplexity under Non-IID conditions for FAUST, Local Adam ($K_x=K_u=K_v$), and heuristic baselines (defined in Section~\ref{sec:experimental_setup}) at high~(a) and low~(b) synchronization frequencies. Due to higher cross-worker variance caused by heterogeneous data, parameters require slightly more frequent synchronization in the low-frequency regime ($K_x=128<256$). Experiments are limited to $T=1536$ steps ($\sim$compute-optimal) for computational feasibility.}
-\label{fig:14}
-\end{figure}
-
 \subsubsection{FAUST Low Communication Configurations Ablation (See Fig.~4)}
 \label{sec:b33_ablation}
 
-Figure~15 explores alternative synchronization configurations enabling FAUST to achieve improved communication efficiency over Local Adam. Motivated by theoretical insights (Sections~\ref{sec:neuronsp} and~\ref{sec:convergence}) and empirical evidence (Sections~\ref{sec:rq1} and~\ref{sec:rq2}), we only consider settings where parameter synchronization is most frequent ($K_x \leq \min(K_u, K_v)$). This constraint follows from experiments in Section~\ref{sec:rq2}, which show that infrequent parameter synchronization significantly degrades perplexity, while momentum synchronization frequency has a smaller impact. For a fixed $2\times$ communication reduction over Local Adam, our findings confirm that synchronizing the first momentum more frequently than the second aligns with their respective half-lives and maintains performance close to Local Adam.
 
 % Figure 15: Neuron_SP 2x communication configs ablation (PDF page 24 bottom)
-\begin{figure}[ht]
-\centering
-% [placeholder for Fig 15]
-\caption{Configurations of FAUST targeting $2\times$ lower communication than Local Adam ($K_x=K_u=K_v$), setting $K_u, K_v$ as multiples of $K_x$. In both high~(a) and low-frequency~(b) regimes, performance depends on how communication is split between momenta for $\beta_1 \ll \beta_2$. Syncing the first momentum less often ($K_u=6K_x, K_v=3K_x$) degrades performance, wasting communication on the slow second momentum. Conversely, syncing it frequently ($K_u=3K_x, K_v=6K_x$) yields performance comparable to Local Adam. Setting $K_u=K_v=4K_x$ produces intermediate results.}
-\label{fig:15}
-\end{figure}
+
 
 \subsubsection{Adam Results (See Fig.~4)}
 \label{sec:b34_adam_fig4}
 
 We now present results for FAUST-Adam with $\beta_1=\beta_2=0.95$. FAUST-Adam achieves similar communication reductions over Local Adam and DDP as ADOPT. However, due to the lower $\beta_2$, the second-momentum half-life ($\tau_{0.5}(0.95)\approx 13.5$) is significantly shorter than for ADOPT ($\tau_{0.5}(0.9999)\approx 6931$). Figure~16 shows that with both momenta evolving at similar rates, the benefit of selecting $K_u < K_v$ diminishes. For consistency and due to meaningful empirical differences in rates of change (Section~\ref{sec:rq1}), we keep $K_u=3\times K_x$ and $K_v=6\times K_x$ in subsequent comparisons.
 
-Figure~17 shows FAUST-Adam achieves a $2\times$ communication reduction over the prior state-of-the-art Local Adam \citep{cheng2025convergencedistributedadaptiveoptimization} without significant perplexity degradation. Due to the much faster evolution of the optimizer states using Adam compared to ADOPT, local worker gradients drive the optimization reducing the benefit of allocating more of the communication budget to the first momentum.
 
-% Figure 16: Neuron_SP-Adam 2x communication configs (PDF page 25)
-\begin{figure}[ht]
-\centering
-% [placeholder for Fig 16]
-\caption{Configurations of FAUST targeting $2\times$ lower communication than Local Adam ($K_x=K_u=K_v$), using Adam ($\beta_1=\beta_2=0.95$). In contrast to FAUST-ADOPT (where $\beta_1 \ll \beta_2$ yields an advantage for $K_u < K_v$ as shown in Fig.~15), the similar half-lives in Adam make perplexity insensitive to how communication is split between momenta for high~(a) and low-frequencies~(b).}
-\label{fig:16}
-\end{figure}
 
-% Figure 17: Neuron_SP-Adam baseline comparison (PDF page 25)
-\begin{figure}[ht]
-\centering
-% [placeholder for Fig 17]
-\caption{FAUST-Adam achieves a $2\times$ communication reduction over the prior state-of-the-art Local Adam without significant perplexity degradation.}
-\label{fig:17}
-\end{figure}
-
-\textbf{Takeaway:} FAUST-Adam achieves a similar $2\times$ communication reduction over Local Adam as FAUST-ADOPT by exploiting the reduced importance of optimizer-state synchronization relative to parameters. However, due to the smaller $\beta_2$ in Adam, there is limited benefit from assigning different synchronization frequencies to the first and second momenta compared to ADOPT.
 
 %-----------------------------------------------------------------------------
 \subsection{RQ4: Additional Metrics and Training Instabilities of FAVG+OPT (See Fig.~5.b)}
 \label{sec:b4_favgopt}
 %-----------------------------------------------------------------------------
 
-Figure~18 complements Fig.~5.b by showing parameter and update norms for FAUST and baseline methods when training billion-scale models. Both FAUST and Local Adam regularize updates by synchronizing optimizer states, effectively reducing update norms due to averaging across workers (triangle inequality). In contrast, the heuristic baseline \citep{sani2024photonfederatedllmpretraining} experiences large updates, leading to uncontrolled parameter growth, increased activations (Fig.~5.b), and degraded performance on downstream ICL tasks (Table~\ref{tab:icl}) relative to its perplexity (Fig.~5.a). The collective fence mechanism in FAUST ensures that pending SP All-to-All handles are fully retired before the data-parallel gradient reduction begins, so the tiered AllReduce operates on correctly sequence-reduced gradients; without this fence, residual SP traffic could corrupt the averaged gradient and amplify the norm instabilities observed in \texttt{FAVG+OPT}.
-
-% Figure 18: Update and parameter norms comparison (PDF page 26)
-\begin{figure}[ht]
-\centering
-% [placeholder for Fig 18]
-\caption{Comparison of update~(a) and parameter norms~(b) for billion-scale models trained with FAUST ($K_x=256, K_u=768, K_v=1536$), Local Adam ($K=256$), DDP, and Federated Averaging with persistent optimizer states (\texttt{FAVG+OPT}). Frequent synchronization in Local Adam and DDP consistently reduces update and parameter norms. Similarly, FAUST achieves comparable reductions at intervals corresponding to multiples of $\texttt{lcm}(K_x, K_u, K_v)$, with smaller intermediate drops. Conversely, \texttt{FAVG+OPT}, which does not synchronize optimizer states, experiences persistently larger and noisier updates, becoming vulnerable to spikes (notably before step $5000$). This leads to uncontrolled parameter growth~(b).}
-\label{fig:18}
-\end{figure}
 
 % Table 5: Throughput comparison (PDF page 26, nougat inline)
-\begin{table}[ht]
+\begin{table}[t]
 \centering
+\small
+\setlength{\tabcolsep}{7.5pt}
+\renewcommand{\arraystretch}{1.12}
 \caption{Throughput (batches/sec) for 1B--13B models to reach $2\times$ compute-optimal tokens at high ($K_x=16$) and low ($K_x=256$) synchronization frequencies with a 2M-token global batch.
 All local methods improve throughput over DDP.
 At high frequency, FAUST achieves over $1.7\times$ throughput on the 13B model; at low frequency, the gain grows to over $2.1\times$.
 The SP All-to-All overhead is included in all measurements and adds $<2\%$ per-step latency at intra-node NVLink bandwidth.}
 \label{tab:throughput}
 \resizebox{\linewidth}{!}{%
-\begin{tabular}{l|cc|cc|cc}
-\toprule
-& \multicolumn{2}{c|}{\textbf{1B Model}}
-& \multicolumn{2}{c|}{\textbf{7B Model}}
-& \multicolumn{2}{c}{\textbf{13B Model}} \\
-\textbf{Method}
-& $K_x{=}16$ & $K_x{=}256$
-& $K_x{=}16$ & $K_x{=}256$
-& $K_x{=}16$ & $K_x{=}256$ \\
-\midrule
+\begin{tabular}{lcccccc}
+\toprule[1.6pt]
+\textbf{Method} &
+\makecell{\textbf{1B}\\$K_x=16$} &
+\makecell{\textbf{1B}\\$K_x=256$} &
+\makecell{\textbf{7B}\\$K_x=16$} &
+\makecell{\textbf{7B}\\$K_x=256$} &
+\makecell{\textbf{13B}\\$K_x=16$} &
+\makecell{\textbf{13B}\\$K_x=256$} \\
+\midrule[1.1pt]
 DDP (Baseline)
 & $171.9^{\pm 0.94}$ & $171.9^{\pm 0.9}$
 & $25.1^{\pm 0.10}$ & $25.1^{\pm 0.10}$
 & $11.1^{\pm 0.03}$ & $11.11^{\pm 0.03}$ \\
-\midrule
+\rowcolor{gray!5}
 FAVG+OPT
 & $304.9^{\pm 2.51}$ & $385.4^{\pm 3.7}$
 & $34.0^{\pm 0.11}$ & $40.4^{\pm 0.15}$
@@ -1379,15 +1369,15 @@ Local Adam
 & $253.1^{\pm 1.59}$ & $380.1^{\pm 3.6}$
 & $30.9^{\pm 0.09}$ & $40.2^{\pm 0.15}$
 & $16.7^{\pm 0.07}$ & $23.3^{\pm 0.14}$ \\
-FAUST ($K_u,\ K_v{=}3K_x,\ 6K_x$)
-& $299.2^{\pm 2.39}$ & $384.1^{\pm 3.7}$
-& $33.7^{\pm 0.11}$ & $40.4^{\pm 0.15}$
-& $19.0^{\pm 0.10}$ & $23.5^{\pm 0.15}$ \\
-\bottomrule
+\rowcolor[HTML]{F6FCF8}
+\textbf{FAUST} ($K_u,\ K_v=3K_x,\ 6K_x$)
+& $\mathbf{299.2}^{\pm 2.39}$ & $\mathbf{384.1}^{\pm 3.7}$
+& $\mathbf{33.7}^{\pm 0.11}$ & $\mathbf{40.4}^{\pm 0.15}$
+& $\mathbf{19.0}^{\pm 0.10}$ & $\mathbf{23.5}^{\pm 0.15}$ \\
+\bottomrule[1.6pt]
 \end{tabular}%
 }
 \end{table}
-
 
 %=============================================================================
 %=============================================================================
@@ -1397,18 +1387,9 @@ FAUST ($K_u,\ K_v{=}3K_x,\ 6K_x$)
 
 While perplexity is invariant to network bandwidth, wall-clock time is highly sensitive to it. To practically showcase this, we perform a benchmark with a 1B model to measure time under extremely low bandwidth conditions (10 Gbit/s). This setup simulates a scenario with affordable, consumer-grade interconnects rather than data-centers---precisely the cross-data-center deployment target for which FAUST is designed (Section~\ref{sec:introduction}). Due to the extreme gradient synchronization delay inherent to DDP in this regime, the benchmark was limited to a $10{,}240$ step horizon to remain feasible. The SP All-to-All collectives still execute at intra-node NVLink bandwidth and are therefore unaffected by the inter-node bandwidth restriction; only the data-parallel AllReduce at $K_x$-boundary steps traverses the slow link.
 
-\begin{figure}[ht]
-\centering
-% Figure 20: 2-panel bandwidth benchmark (PDF page 28 top)
-\caption{Training efficiency benchmark on a 1B model under restricted bandwidth (10 Gbit/s). \textbf{Left:} Perplexity versus wall-clock time. FAUST Nesterov effectively decouples training time from bandwidth, finishing in $\approx 9$ hours compared to the projected $\approx 3.5$ days for DDP (dashed blue). \textbf{Right:} Perplexity versus sequential steps. While step-wise convergence is comparable, the communication overhead of DDP creates a massive bottleneck in the time domain.}
-\label{fig:low_bandwidth}
-\end{figure}
 
-As shown in Figure~\ref{fig:low_bandwidth}, FAUST Nesterov dramatically reduces training time by $\approx 9.42\times$ compared to DDP, completing the run in $8.99$ hours versus $84.73$ hours ($3.5$ days) for DDP, even with the constant overheads of our unoptimized implementation. Furthermore, FAUST Nesterov is more efficient than Local Adam, finishing $\approx 7\%$ faster (8.99h vs.\ 9.62h) while achieving significantly lower perplexity (8.91 vs.\ $10.19$). When compared to the ultra-lightweight DiLoCo baseline (8.68h), FAUST Nesterov incurs a time penalty of $\approx 3.6\%$ due to the additional optimizer state synchronization. However, this yields performance gains, improving final perplexity by $\approx 2.3\%$ (8.91 vs.\ 9.12) over DiLoCo.
+FAUST Nesterov dramatically reduces training time by $\approx 9.42\times$ compared to DDP, completing the run in $8.99$ hours versus $84.73$ hours ($3.5$ days) for DDP, even with the constant overheads of our unoptimized implementation. Furthermore, FAUST Nesterov is more efficient than Local Adam, finishing $\approx 7\%$ faster (8.99h vs.\ 9.62h) while achieving significantly lower perplexity (8.91 vs.\ $10.19$). When compared to the ultra-lightweight DiLoCo baseline (8.68h), FAUST Nesterov incurs a time penalty of $\approx 3.6\%$ due to the additional optimizer state synchronization. However, this yields performance gains, improving final perplexity by $\approx 2.3\%$ (8.91 vs.\ 9.12) over DiLoCo.
 
-\begin{center}\fbox{\parbox{0.95\textwidth}{
-\textbf{Takeaway:} In extremely low bandwidth settings ($10$ Gbit/s), FAUST Nesterov eliminates the communication bottleneck, reducing training time by $9.42\times$ over DDP. It strikes a balance on the Pareto frontier: its wall-clock time is in-between those of Local Adam and DiLoCo while outperforming them both in perplexity. The compile-time SP decomposition is bandwidth-agnostic (intra-node only), so FAUST's communication savings compose multiplicatively with the bandwidth reduction.
-}}\end{center}
 
 %=============================================================================
 \subsection{Muon Experimental Details }
@@ -1416,7 +1397,7 @@ As shown in Figure~\ref{fig:low_bandwidth}, FAUST Nesterov dramatically reduces 
 \label{sec:muon_details}
 %=============================================================================
 
-This section provides the full experimental details for the Muon experiments presented in Section~\ref{sec:rq6}. Although a comprehensive theoretical treatment of preconditioned local updates under Newton-Schulz iterations is outside the scope of this work, the FAUST design is inherently compatible with such structures, as the momentum buffer follows standard EMA dynamics regardless of the subsequent preconditioning step. Moreover, the compile-time SP pass is optimizer-agnostic: it operates on the forward/backward computation graph and does not interact with the optimizer's internal state management, so Muon's Newton-Schulz orthogonalization composes with SP identically to Adam's moment updates.
+This section provides the full experimental details for the Muon experiments presented. Although a comprehensive theoretical treatment of preconditioned local updates under Newton-Schulz iterations is outside the scope of this work, the FAUST design is inherently compatible with such structures, as the momentum buffer follows standard EMA dynamics regardless of the subsequent preconditioning step. Moreover, the compile-time SP pass is optimizer-agnostic: it operates on the forward/backward computation graph and does not interact with the optimizer's internal state management, so Muon's Newton-Schulz orthogonalization composes with SP identically to Adam's moment updates.
 
 \textbf{Experimental Details.} We utilize the standard PyTorch implementation of Muon with Nesterov momentum enabled and a weight decay of $0.1$. Following the recommendations of \citet{liu2025muonscalablellmtraining}, we apply the \texttt{match\_rms\_norm} adjustment to learning rates. We adopt the conventional split optimization strategy for Muon: AdamW handles embeddings and layer normalizations, while Muon optimizes all 2D matrices~\citep{jordan2024muon}. The momentum parameter for Muon is set to $\beta=0.9$, while the Adam component retains the $\beta_1=0.9, \beta_2=0.999$ settings used elsewhere. Gradient clipping thresholds are scaled by model size: $1.0$ for 16M, $0.5$ for 125M, and $0.25$ for 360M. For the Local Muon baseline, all optimizer states (Muon momentum; Adam first/second momenta) synchronize every $32$ steps. In contrast, FAUST delays state synchronization: the first momentum (for both optimizers) synchronizes every $96$ steps ($3\times$ reduction), and Adam's second momentum synchronizes every $192$ steps ($6\times$ reduction).
 
@@ -1429,18 +1410,6 @@ To demonstrate the universality of FAUST across different modalities and archite
 
 \textbf{Experimental Setup.} We utilize the $280$M parameter variant of Flux provided by \texttt{torchtitan}, training with a global batch size of $256$. The inner optimizer is AdamW with $\beta_1=0.9, \beta_2=0.999$. We compare three settings: (1)~DDP, (2)~Local Adam with a synchronization period of $K=32$, and (3)~FAUST with a parameter sync period of $K_x=32$. For FAUST, we decouple the momentum synchronization significantly, setting $K_u=3K_x$ and $K_v=6K_x$ (192 steps).
 
-\begin{figure}[ht]
-\centering
-% Figure 21: Flux training loss (PDF page 29 middle)
-\caption{Training loss comparison on the $280$M parameter Flux model (Rectified Flow Transformer). FAUST ($K_x=32$, $K_u=96$, $K_v=192$) effectively matches the convergence trajectory of both the fully synchronous DDP baseline and Local Adam ($K=32$).}
-\label{fig:flux}
-\end{figure}
-
-Our results, visualized in Fig.~\ref{fig:flux}, indicate that FAUST generally matches the performance of Local Adam and approaches the DDP upper bound.
-
-\begin{center}\fbox{\parbox{0.95\textwidth}{
-\textbf{Takeaway:} The efficacy of FAUST extends beyond LLMs to Rectified Flow Transformers (Flux). The method generally matches the performance of DDP and Local Adam while reducing communication by $2\times$ over Local Adam, demonstrating the universality of the approach. We leave the scaling of this result to larger vision models for future work.
-}}\end{center}
 
 %=============================================================================
 \subsection{Throughput at 7B Scale}
@@ -1449,14 +1418,8 @@ Our results, visualized in Fig.~\ref{fig:flux}, indicate that FAUST generally ma
 
 To assess the practical scalability of our method on state-of-the-art hardware and at large model scales, we measure the training throughput of a 7B parameter model distributed across $8$ independent NVIDIA B200 GPUs.
 
-\textbf{Throughput Analysis.} As illustrated in Fig.~\ref{fig:throughput_7b}, during the local update phases, each GPU operates at the peak efficiency of a fully isolated local run, achieving identical tokens-per-second throughput as a single B200 with zero synchronization overhead. Distinct drops in throughput are observed only at the sparse synchronization boundaries ($K_x=32$, $K_u=96$, $K_v=192$), where the system pauses to aggregate model parameters and optimizer states via the tiered AllReduce. The SP All-to-All collectives execute every step but are overlapped with the attention computation on the NVLink fabric, contributing $<2\%$ overhead that is invisible in the throughput trace.
+\textbf{Throughput Analysis.} As illustrated during the local update phases, each GPU operates at the peak efficiency of a fully isolated local run, achieving identical tokens-per-second throughput as a single B200 with zero synchronization overhead. Distinct drops in throughput are observed only at the sparse synchronization boundaries ($K_x=32$, $K_u=96$, $K_v=192$), where the system pauses to aggregate model parameters and optimizer states via the tiered AllReduce. The SP All-to-All collectives execute every step but are overlapped with the attention computation on the NVLink fabric, contributing $<2\%$ overhead that is invisible in the throughput trace.
 
-\begin{figure}[ht]
-\centering
-% Figure 22: Throughput plot (PDF page 30 top)
-\caption{Instantaneous throughput (tokens/sec) for a 7B model on 8x B200s. FAUST maintains peak ``local-only'' speed for the vast majority of steps, with throughput dips occurring only at synchronization intervals (32, 96, 192). In contrast, standard DDP would incur a synchronization penalty at \textit{every} step, permanently depressing the throughput curve.}
-\label{fig:throughput_7b}
-\end{figure}
 
 Crucially, standard DDP incurs this communication penalty at \textit{every single training step}, significantly lowering the average tokens/sec. Even with our current unoptimized ``stop-the-world'' implementation---which explicitly pauses computation to communicate and does not leverage computation-communication overlap---FAUST significantly increases aggregate throughput by amortizing these costs over long local training windows.
 
@@ -1497,136 +1460,6 @@ already-reduced parameter averages $\mathbb{E}_m[x^m_t]$.
 The SP graph rewrite and the FedOpt outer update thus act on disjoint stages of the training
 loop and compose without interference.
 
-\subsection{Deterministic Optimizer-specific Variants of Algorithm~\ref{alg:desloc}}
-\label{sec:algorithm_variants}
-
-We now present the concrete instantiations of the generic FAUST algorithm
-(Algorithm~\ref{alg:desloc}) for the Adam and ADOPT inner optimizers.
-In both variants the compile-time SP pass is implicit: the stochastic gradient
-$g^m_t = \nabla F(x^m_t; \xi^m_t)$ is already sequence-reduced by the backward All-to-All
-before it enters the optimizer loop below, so the pseudocode applies identically with
-$P_{\text{SP}} = 1$ (no SP) and $P_{\text{SP}} > 1$.
-The $\mathbb{E}_m[\cdot]$ averaging operator denotes the cross-replica AllReduce over the
-data-parallel group; when ZeRO-1 optimizer-state partitioning is active, this reduces to a
-reduce-scatter followed by a per-shard update and an all-gather, gated by the corresponding
-synchronization period ($K_x$, $K_u$, or $K_v$).
-
-\begin{algorithm}[ht]
-\caption{FAUST-Adam}
-\label{alg:desloc_adam}
-\begin{algorithmic}[1]
-\REQUIRE Model tensors, hyper-parameters
-\STATE $x_0, u_{-1}, v_{-1} \in \mathbb{R}^d$ \COMMENT{initial parameter vector; seeds for first and second moments}
-\STATE $\{\eta_t\}_{t=0}^{T-1} \subset \mathbb{R}_{>0}$ \COMMENT{$K_x$-aligned WSD step-size schedule}
-\STATE $\beta_1, \beta_2 \in [0,1)$ \COMMENT{Adam decay factors}
-\STATE $\rho, \lambda \in \mathbb{R}_{>0}$ \COMMENT{gradient clipping term; $\ell_2$ stability term}
-\STATE $T, M \in \mathbb{N}_+$ \COMMENT{total iterations; number of workers}
-\STATE $K_x, K_u, K_v \in \mathbb{N}_+$ \COMMENT{sync periods for parameters, first moments, and second moments}
-\ENSURE $x_T, u_{T-1}, v_{T-1}$
-
-\STATE For each worker $m$: initialize $x^m_0 = x_0$ and $u^m_{-1} = v^m_{-1} = 0$.
-
-\FOR{$t = 0, \ldots, T-1$}
-    \FORALL{$m = 0, \ldots, M-1$}
-        \STATE \COMMENT{all workers execute in parallel}
-        \STATE $g^m_t \gets \nabla F(x^m_t; \xi^m_t)$ \COMMENT{stochastic gradient; SP-reduced if $P_{\text{SP}}>1$}
-        \STATE $\hat{g}^m_t \gets \mathrm{clip}(g^m_t, \rho)$ \COMMENT{clip to radius $\rho$}
-
-        \IF{$t \bmod K_u = 0$}
-            \STATE $u^m_t \gets \beta_1 \mathbb{E}_m[u^m_{t-1}] + (1-\beta_1)\hat{g}^m_t$ \COMMENT{sync $u$}
-        \ELSE
-            \STATE $u^m_t \gets \beta_1 u^m_{t-1} + (1-\beta_1)\hat{g}^m_t$
-        \ENDIF
-
-        \IF{$t \bmod K_v = 0$}
-            \STATE $v^m_t \gets \beta_2 \mathbb{E}_m[v^m_{t-1}] + (1-\beta_2)(\hat{g}^m_t \odot \hat{g}^m_t)$ \COMMENT{sync $v$}
-        \ELSE
-            \STATE $v^m_t \gets \beta_2 v^m_{t-1} + (1-\beta_2)(\hat{g}^m_t \odot \hat{g}^m_t)$
-        \ENDIF
-
-        \STATE $d^m_t \gets \dfrac{\eta_t}{\sqrt{v^m_t+\lambda^2}} \odot u^m_t$ \COMMENT{bias-corrected step}
-
-        \IF{$t \bmod K_x = 0$}
-            \STATE $x^m_{t+1} \gets \mathbb{E}_m[x^m_t] - d^m_t$ \COMMENT{sync $x$}
-        \ELSE
-            \STATE $x^m_{t+1} \gets x^m_t - d^m_t$
-        \ENDIF
-    \ENDFOR
-\ENDFOR
-\end{algorithmic}
-\end{algorithm}
-
-\begin{algorithm}[ht]
-\caption{FAUST-ADOPT}
-\label{alg:desloc_adopt}
-\begin{algorithmic}[1]
-\REQUIRE Model tensors, Hyper-parameters
-\STATE $x_0, m_{-1}, v_{-1} \in \mathbb{R}^d$ \COMMENT{initial parameter vector and momenta}
-\STATE $\{\eta_t\}_{t=0}^{T-1} \subset \mathbb{R}_{>0}$ \COMMENT{$K_x$-aligned WSD learning rate schedule}
-\STATE $\beta_1, \beta_2 \in [0,1)$ \COMMENT{decay factors}
-\STATE $\rho, \epsilon \in \mathbb{R}_{>0}$ \COMMENT{gradient clipping term, small stability constant}
-\STATE $T, M \in \mathbb{N}_+$ \COMMENT{total iterations, number of workers}
-\STATE $K_x, K_m, K_v \in \mathbb{N}_+$ \COMMENT{sync periods for parameters, first and second moments}
-\ENSURE $x_T$, $m_{T-1}$, $v_{T-1}$
-\STATE for each worker $m$: $x^m_0 = x_0$, $m^m_{-1} = v^m_{-1} = 0$ \COMMENT{local initialization}
-\FOR{$t = 0, \ldots, T-1$}
-    \FOR{all workers $m = 0, \ldots, M-1$ \textbf{in parallel}}
-        \STATE $g^m_t \gets \nabla F(x^m_t; \xi^m_t)$ \COMMENT{stochastic gradient (SP-reduced when $P_{\text{SP}}>1$)}
-        \STATE $\hat{g}^m_t \gets \text{clip}(g^m_t, \rho)$ \COMMENT{gradient clipping}
-        \IF{$t \bmod K_v = 0$}
-            \STATE $v^m_t \gets \beta_2 \mathbb{E}_m[v^m_{t-1}] + (1 - \beta_2)(\hat{g}^m_t \odot \hat{g}^m_t)$
-        \ELSE
-            \STATE $v^m_t \gets \beta_2 v^m_{t-1} + (1 - \beta_2)(\hat{g}^m_t \odot \hat{g}^m_t)$
-        \ENDIF
-        \IF{$t \bmod K_m = 0$}
-            \STATE $m^m_t \gets \beta_1 \mathbb{E}_m[m^m_{t-1}] + (1 - \beta_1) \frac{\hat{g}^m_t}{\max\{\sqrt{v^m_{t-1}}, \epsilon\}}$
-        \ELSE
-            \STATE $m^m_t \gets \beta_1 m^m_{t-1} + (1 - \beta_1) \frac{\hat{g}^m_t}{\max\{\sqrt{v^m_{t-1}}, \epsilon\}}$ \COMMENT{ADOPT update}
-        \ENDIF
-        \STATE $d^m_t \gets \eta_t m^m_t$
-        \IF{$t \bmod K_x = 0$}
-            \STATE $x^m_{t+1} \gets \mathbb{E}_m[x^m_t] - d^m_t$
-        \ELSE
-            \STATE $x^m_{t+1} \gets x^m_t - d^m_t$
-        \ENDIF
-    \ENDFOR
-\ENDFOR
-\end{algorithmic}
-\end{algorithm}
-
-\paragraph{Interaction with ZeRO-1 optimizer-state partitioning.}
-In the FAUST implementation, the $\mathbb{E}_m[\cdot]$ operator in
-Algorithms~\ref{alg:desloc_adam} and~\ref{alg:desloc_adopt} is realized as a
-\texttt{reduce\_scatter} over the data-parallel group followed by a per-shard
-optimizer step and a parameter \texttt{all\_gather}.
-The synchronization gate ($t \bmod K_j = 0$) controls whether the
-\texttt{reduce\_scatter} fires or the gradient is accumulated locally.
-This tiered gating integrates naturally with the bucketed gradient-reduction
-pipeline: each gradient bucket is tagged with its structural tier
-(embedding/normalization $\to$ $x$-tier, attention projections $\to$ $u$-tier,
-feed-forward blocks $\to$ $v$-tier), and the bucket's AllReduce is dispatched
-only when the corresponding period $K_j$ divides $t$.
-A collective fence serializes all pending SP All-to-All handles before any
-data-parallel reduction begins, ensuring that the gradient entering the
-optimizer is fully sequence-reduced.
-
-\paragraph{Correctness of SP-reduced gradients in the optimizer loop.}
-Under the Ulysses head-splitting SP strategy, each device computes the backward
-pass on its local sequence chunk and the backward All-to-All aggregates the
-partial activation gradients into a complete per-parameter gradient.
-Formally, let $g^{m,p}_t$ denote the partial gradient computed by SP rank $p$
-on device $m$. The backward All-to-All produces
-$g^m_t = \sum_{p=0}^{P_{\text{SP}}-1} g^{m,p}_t$, which is the same gradient
-that would be computed by a non-SP forward-backward pass on the full sequence.
-This identity holds exactly for linear layers and attention (where the All-to-All
-implements a head-dimension repartitioning), and up to floating-point reduction
-order for LayerNorm parameters (which require an additional TP-group AllReduce
-of the partial gradients, implemented in the SP backward hook).
-The optimizer loop in Algorithms~\ref{alg:desloc_adam} and~\ref{alg:desloc_adopt}
-therefore operates on the same $g^m_t$ regardless of $P_{\text{SP}}$, and the
-convergence analysis in Sections~\ref{sec:sgdm_proof} and~\ref{sec:adam_extension}
-applies without modification.
-%=============================================================================
 
 \subsection{Extension to FedOpt}
 \label{sec:fedopt}
@@ -1637,9 +1470,9 @@ work, the new global model is created by averaging the local client models. In r
 \texttt{FedOpt} literature~\citep{reddi2021adaptivefederatedoptimization}, the scheme chosen by~\citet{cheng2025convergencedistributedadaptiveoptimization} resembles
 that of \texttt{FedAvg}, or where the server optimizer is \texttt{SGD} with the outer learning rate set to one~\citep{reddi2021adaptivefederatedoptimization}.
 Naturally, the question of whether alternate server optimizers than have been used in prior works
-can also be implemented for \texttt{Local Adam}, and thus \texttt{DES-LOC}, arises.
+can also be implemented for \texttt{Local Adam} , arises.
 
-We argue that indeed \texttt{DES-LOC}'s principles can be effectively applied to any \texttt{FedOpt} method and
+We argue that indeed principles can be effectively applied to any \texttt{FedOpt} method and
 not just \texttt{FedAvg}. While using an alternate server optimizer does not have proven convergence
 guarantees as yet, we show in Algorithm~\ref{alg:desloc} that the choice of the \texttt{ServerOpt} is not constrained
 from a practical point-of-view. However, the improvements that \texttt{DES-LOC} provide are related to
@@ -1647,100 +1480,255 @@ the local optimization procedure, which is orthogonal to the outer optimizer cho
 Choosing the correct, and most effective, outer optimizer is an open research area~\citep{khaled2025understandingouteroptimizerslocal},
 and we leave the investigations of the interactions between \texttt{DES-LOC} and outer optimizers to future work.
 
-\subsection{Deterministic Optimizer-specific Variants of Algorithm 1}
+
+\subsection{Deterministic Optimizer-specific Variants of Algorithm~\ref{alg:desloc}}
 \label{sec:algorithm_variants}
 
+We now present the concrete instantiation of the generic FAUST algorithm
+(Algorithm~\ref{alg:desloc}) for the Adam inner optimizer.
+Unlike prior formulations that treat the compile-time SP pass as an implicit
+black box---merely annotating the gradient with ``SP-reduced''---we make the
+intra-step All-to-All collective and its interaction with the inter-step
+data-parallel synchronization a \emph{first-class citizen} of the algorithm.
+This explicit coupling is both necessary and novel:
+it exposes the \textbf{collective orthogonality constraint}
+($\mathcal{A}_P$ must retire before $\mathbb{E}_m$ fires),
+enables the SP-tightened clipping bound $\rho_{\text{eff}} = \rho / \sqrt{P}$
+for the $d_{\text{attn}}$ attention-layer coordinates~\eqref{eq:sp_var_reduction},
+and formalizes the structural tiering (embedding/norm $\to$ $K_x$-tier,
+attention projections $\to$ $K_u$-tier, FFN $\to$ $K_v$-tier) that FAUST's
+implementation deploys via the \texttt{DeslocTieredAllReduce} backend.
+
+The $\mathbb{E}_m[\cdot]$ averaging operator denotes the cross-replica AllReduce over the
+data-parallel group; when ZeRO-1 optimizer-state partitioning is active, this reduces to a
+reduce-scatter followed by a per-shard update and an all-gather, gated by the corresponding
+synchronization period ($K_x$, $K_u$, or $K_v$).
+The All-to-All operator $\mathcal{A}_P$ corresponds to the Ulysses head-splitting
+collective: for input $Q,K,V \in \mathbb{R}^{B \times N \times S/P \times H}$,
+it produces $[B, N/P, S, H]$ by scattering along the head dimension and gathering
+along the sequence dimension; the inverse $\mathcal{A}_P^{-1}$ restores the original
+layout after SDPA. In our compiler implementation,
+$\mathcal{A}_P$ is realized as \texttt{torch.ops.autosp.all\_to\_all} with
+autograd support for the backward pass.
+
 \begin{algorithm}[ht]
-\caption{DES-LOC-Adam}
+\caption{FAUST-Adam with Explicit SP--DP Collective Orchestration}
 \label{alg:desloc_adam}
 \begin{algorithmic}[1]
-\REQUIRE Model tensors, hyper-parameters
-\STATE $x_0, u_{-1}, v_{-1} \in \mathbb{R}^d$ \COMMENT{initial parameter vector; seeds for first and second moments}
-\STATE $\{\eta_t\}_{t=0}^{T-1} \subset \mathbb{R}_{>0}$ \COMMENT{step-size schedule}
-\STATE $\beta_1, \beta_2 \in [0,1)$ \COMMENT{Adam decay factors}
-\STATE $\rho, \lambda \in \mathbb{R}_{>0}$ \COMMENT{gradient clipping term; $\ell_2$ stability term}
-\STATE $T, M \in \mathbb{N}_+$ \COMMENT{total iterations; number of workers}
-\STATE $K_x, K_u, K_v \in \mathbb{N}_+$ \COMMENT{sync periods for parameters, first moments, and second moments}
+\REQUIRE Model $x_0 \in \mathbb{R}^d$; first/second moment seeds $u_{-1}, v_{-1} \in \mathbb{R}^d$
+\REQUIRE $\{\eta_t\}_{t=0}^{T-1} \subset \mathbb{R}_{>0}$ \COMMENT{$K_x$-aligned WSD step-size schedule}
+\REQUIRE $\beta_1, \beta_2 \in [0,1)$; $\rho, \lambda \in \mathbb{R}_{>0}$ \COMMENT{Adam decays; clip bound; stability}
+\REQUIRE $T, M \in \mathbb{N}_+$ \COMMENT{total iterations; DP workers}
+\REQUIRE $P \in \mathbb{N}_+$ \COMMENT{SP degree ($P = 1$ recovers non-SP)}
+\REQUIRE $K_x, K_u, K_v \in \mathbb{N}_+$ with $K_x \mid K_u \mid K_v$ \COMMENT{tier sync periods, divisibility chain}
+\REQUIRE $L$ \COMMENT{number of attention (SDPA) layers}
 \ENSURE $x_T, u_{T-1}, v_{T-1}$
 
-\STATE For each worker $m$: initialize $x^m_0 = x_0$ and $u^m_{-1}=v^m_{-1}=0$.
-
+\STATE $\forall m$: $x^m_0 \gets x_0$;\; $u^m_{-1} \gets v^m_{-1} \gets 0$
+\STATE $\mathcal{H} \gets \emptyset$ \COMMENT{set of pending A2A async handles}
 \FOR{$t = 0, \ldots, T-1$}
-    \FORALL{$m = 0, \ldots, M-1$}
-        \STATE \COMMENT{all workers execute in parallel}
-        \STATE $g^m_t \gets \nabla F(x^m_t; \xi^m_t)$ \COMMENT{stochastic gradient}
-        \STATE $\hat{g}^m_t \gets \mathrm{clip}(g^m_t, \rho)$ \COMMENT{clip to radius $\rho$}
-
+    \FORALL{$m = 0, \ldots, M-1$ \textbf{in parallel}}
+        \STATE \COMMENT{\textbf{--- Phase 1: Intra-step SP forward (compile-time inserted) ---}}
+        \STATE Partition mini-batch $\xi^m_t$ into $P$ chunks along sequence dim
+        \FOR{$\ell = 1, \ldots, L$}
+            \STATE $Q_\ell, K_\ell, V_\ell \gets \mathcal{A}_P\!\bigl(Q_\ell^{\text{loc}}, K_\ell^{\text{loc}}, V_\ell^{\text{loc}}\bigr)$ \COMMENT{$[B,N,\tfrac{S}{P},H] \!\to\! [B,\tfrac{N}{P},S,H]$}
+            \STATE $O_\ell \gets \mathrm{SDPA}(Q_\ell, K_\ell, V_\ell)$ \COMMENT{full-$S$ attention on $N/P$ heads}
+            \STATE $O_\ell^{\text{loc}} \gets \mathcal{A}_P^{-1}(O_\ell)$;\quad $\mathcal{H} \gets \mathcal{H} \cup \{h_\ell\}$ \COMMENT{async handle}
+        \ENDFOR
+        \STATE \COMMENT{\textbf{--- Phase 2: Backward with FP32 A2A accumulation ---}}
+        \STATE $\tilde{g}^m_t \gets \nabla_x \mathcal{L}\bigl(x^m_t;\, \xi^m_t,\, \{O_\ell^{\text{loc}}\}\bigr)$ \COMMENT{backward through compiled graph $\mathcal{G}'$}
+        \STATE $g^m_t \gets \sum_{p=0}^{P-1} \tilde{g}^{m,p}_t$ \COMMENT{backward A2A reduces partial grads; FP32 accum.}
+        \STATE $\hat{g}^m_t \gets \mathrm{clip}\!\bigl(g^m_t,\, \rho_j\bigr)$ where $\rho_j = \begin{cases} \rho\,/\!\sqrt{P} & j \in \mathcal{I}_{\text{attn}} \\ \rho & \text{otherwise}\end{cases}$ \COMMENT{SP-tightened clip}
+        \STATE \COMMENT{\textbf{--- Phase 3: Collective fence ---}}
+        \IF{$t \bmod K_x = 0$}
+            \STATE \textsc{WaitAll}$(\mathcal{H})$;\; $\mathcal{H} \gets \emptyset$ \COMMENT{fence: all A2A handles must retire before DP sync}
+        \ENDIF
+        \STATE \COMMENT{\textbf{--- Phase 4: Inter-step DP optimizer with tiered sync ---}}
         \IF{$t \bmod K_u = 0$}
-            \STATE $u^m_t \gets \beta_1 \mathbb{E}_m[u^m_{t-1}] + (1-\beta_1)\hat{g}^m_t$ \COMMENT{sync $u$}
+            \STATE $u^m_t \gets \beta_1 \mathbb{E}_m[u^m_{t-1}] + (1-\beta_1)\hat{g}^m_t$ \COMMENT{AllReduce first moment}
         \ELSE
-            \STATE $u^m_t \gets \beta_1 u^m_{t-1} + (1-\beta_1)\hat{g}^m_t$
+            \STATE $u^m_t \gets \beta_1 u^m_{t-1} + (1-\beta_1)\hat{g}^m_t$ \COMMENT{local EMA}
         \ENDIF
 
         \IF{$t \bmod K_v = 0$}
-            \STATE $v^m_t \gets \beta_2 \mathbb{E}_m[v^m_{t-1}] + (1-\beta_2)(\hat{g}^m_t \odot \hat{g}^m_t)$ \COMMENT{sync $v$}
+            \STATE $v^m_t \gets \beta_2 \mathbb{E}_m[v^m_{t-1}] + (1-\beta_2)(\hat{g}^m_t \odot \hat{g}^m_t)$ \COMMENT{AllReduce second moment}
         \ELSE
-            \STATE $v^m_t \gets \beta_2 v^m_{t-1} + (1-\beta_2)(\hat{g}^m_t \odot \hat{g}^m_t)$
+            \STATE $v^m_t \gets \beta_2 v^m_{t-1} + (1-\beta_2)(\hat{g}^m_t \odot \hat{g}^m_t)$ \COMMENT{local EMA}
         \ENDIF
 
-        \STATE $d^m_t \gets \dfrac{\eta_t}{\sqrt{v^m_t+\lambda^2}} \odot u^m_t$ \COMMENT{bias-corrected step}
+        \STATE $d^m_t \gets \dfrac{\eta_t}{\sqrt{v^m_t+\lambda^2}} \odot u^m_t$ \COMMENT{preconditioned step}
 
         \IF{$t \bmod K_x = 0$}
-            \STATE $x^m_{t+1} \gets \mathbb{E}_m[x^m_t] - d^m_t$ \COMMENT{sync $x$}
+            \STATE $x^m_{t+1} \gets \mathbb{E}_m[x^m_t] - d^m_t$ \COMMENT{AllReduce parameters}
         \ELSE
-            \STATE $x^m_{t+1} \gets x^m_t - d^m_t$
+            \STATE $x^m_{t+1} \gets x^m_t - d^m_t$ \COMMENT{local step}
         \ENDIF
     \ENDFOR
 \ENDFOR
 \end{algorithmic}
 \end{algorithm}
+
+\paragraph{Relationship between Algorithm~\ref{alg:desloc_adam} and the AutoSP compiler.}
+The four phases above map directly to the AutoSP compilation pipeline
+(commit \texttt{5efb24a}):
+Phase~1 is realized by the five compiler passes
+\textsc{ShardSeqDim}~$\to$~\textsc{ShardInputIds}~$\to$~\textsc{ShardLabelIds}~$\to$~\textsc{ShardPositionIds}~$\to$~\textsc{InsertA2A},
+which rewrite the FX graph $\mathcal{G}$ into $\mathcal{G}'$ by inserting
+$4L$ All-to-All nodes (one scatter-heads/gather-seq before each of $Q,K,V$,
+plus one scatter-seq/gather-heads after $O$, per layer).
+Phase~2 exploits PyTorch's autograd: the registered backward for
+\texttt{autosp::all\_to\_all} swaps scatter and gather indices, so
+$\nabla \mathcal{A}_P = \mathcal{A}_P^{-1}$, yielding the FP32-accumulated
+partial-gradient summation.
+Phase~3 corresponds to the \texttt{\_desloc\_fence\_all\_pending} routine,
+which blocks until all $|\mathcal{H}|$ asynchronous handles complete---enforcing
+the orthogonality invariant that no DP AllReduce observes a partially-reduced
+SP gradient.
+Phase~4 is the standard tiered EMA update with bucket-level AllReduce gating,
+where each gradient bucket is tagged with its structural tier
+(embedding/normalization~$\to$~$K_x$, attention projections~$\to$~$K_u$,
+FFN~$\to$~$K_v$) as implemented in \texttt{DeslocTieredAllReduceTorch}.
 
 \begin{algorithm}[ht]
-\caption{DES-LOC-ADOPT}
+\caption{FAUST-ADOPT with Explicit SP--DP Collective Orchestration}
 \label{alg:desloc_adopt}
 \begin{algorithmic}[1]
-\REQUIRE Model tensors, Hyper-parameters
-\STATE $x_0, m_{-1}, v_{-1} \in \mathbb{R}^d$ \COMMENT{initial parameter vector and momenta}
-\STATE $\{\eta_t\}_{t=0}^{T-1} \subset \mathbb{R}_{>0}$ \COMMENT{learning rate schedule}
-\STATE $\beta_1, \beta_2 \in [0,1)$ \COMMENT{decay factors}
-\STATE $\rho, \epsilon \in \mathbb{R}_{>0}$ \COMMENT{gradient clipping term, small stability constant}
-\STATE $T, M \in \mathbb{N}_+$ \COMMENT{total iterations, number of workers}
-\STATE $K_x, K_m, K_v \in \mathbb{N}_+$ \COMMENT{sync periods for parameters, first and second moments}
+\REQUIRE Model $x_0 \in \mathbb{R}^d$; moment seeds $m_{-1}, v_{-1} \in \mathbb{R}^d$
+\REQUIRE $\{\eta_t\}_{t=0}^{T-1} \subset \mathbb{R}_{>0}$ \COMMENT{$K_x$-aligned WSD learning rate schedule}
+\REQUIRE $\beta_1, \beta_2 \in [0,1)$; $\rho, \epsilon \in \mathbb{R}_{>0}$ \COMMENT{decay; clip bound; stability}
+\REQUIRE $T, M \in \mathbb{N}_+$ \COMMENT{total iterations; DP workers}
+\REQUIRE $P \in \mathbb{N}_+$; $L \in \mathbb{N}_+$ \COMMENT{SP degree; number of SDPA layers}
+\REQUIRE $K_x, K_m, K_v \in \mathbb{N}_+$ with $K_x \mid K_m \mid K_v$ \COMMENT{tier sync periods}
 \ENSURE $x_T$, $m_{T-1}$, $v_{T-1}$
-\STATE for each worker $m$: $x^m_0 = x_0$, $m^m_{-1} = v^m_{-1} = 0$ \COMMENT{local initialization}
+
+\STATE $\forall w$: $x^w_0 \gets x_0$;\; $m^w_{-1} \gets v^w_{-1} \gets 0$
+\STATE $\mathcal{H} \gets \emptyset$ \COMMENT{pending A2A async handles}
 \FOR{$t = 0, \ldots, T-1$}
-    \FOR{all workers $m = 0, \ldots, M-1$ \textbf{in parallel}}
-        \STATE $g^m_t \gets \nabla F(x^m_t; \xi^m_t)$ \COMMENT{stochastic gradient}
-        \STATE $\hat{g}^m_t \gets \text{clip}(g^m_t, \rho)$ \COMMENT{gradient clipping}
+    \FORALL{$w = 0, \ldots, M-1$ \textbf{in parallel}}
+        \STATE \COMMENT{\textbf{--- Phase 1: Intra-step SP forward ---}}
+        \STATE Partition $\xi^w_t$ into $P$ chunks along sequence dim \COMMENT{compiled $\mathcal{G}'$}
+        \FOR{$\ell = 1, \ldots, L$}
+            \STATE $Q_\ell, K_\ell, V_\ell \gets \mathcal{A}_P(Q_\ell^{\text{loc}}, K_\ell^{\text{loc}}, V_\ell^{\text{loc}})$ \COMMENT{$[B,N,\tfrac{S}{P},H] \!\to\! [B,\tfrac{N}{P},S,H]$}
+            \STATE $O_\ell \gets \mathrm{SDPA}(Q_\ell, K_\ell, V_\ell)$;\quad $O_\ell^{\text{loc}} \gets \mathcal{A}_P^{-1}(O_\ell)$;\quad $\mathcal{H} \gets \mathcal{H} \cup \{h_\ell\}$
+        \ENDFOR
+        \STATE \COMMENT{\textbf{--- Phase 2: Backward with FP32 A2A + SP-tightened clip ---}}
+        \STATE $g^w_t \gets \sum_{p=0}^{P-1} \tilde{g}^{w,p}_t$ \COMMENT{backward A2A: $\nabla\mathcal{A}_P = \mathcal{A}_P^{-1}$; FP32 accum.}
+        \STATE $\hat{g}^w_t \gets \mathrm{clip}(g^w_t,\, \rho_j)$ where $\rho_j = \rho\,/\!\sqrt{P}$ for $j \in \mathcal{I}_{\text{attn}}$, $\rho$ otherwise
+        \STATE \COMMENT{\textbf{--- Phase 3: Collective fence ---}}
+        \IF{$t \bmod K_x = 0$}
+            \STATE \textsc{WaitAll}$(\mathcal{H})$;\; $\mathcal{H} \gets \emptyset$ \COMMENT{A2A $\perp$ DP: fence before any AllReduce}
+        \ENDIF
+        \STATE \COMMENT{\textbf{--- Phase 4: ADOPT optimizer with tiered DP sync ---}}
         \IF{$t \bmod K_v = 0$}
-            \STATE $v^m_t \gets \beta_2 \mathbb{E}_m[v^m_{t-1}] + (1 - \beta_2)(\hat{g}^m_t \odot \hat{g}^m_t)$
+            \STATE $v^w_t \gets \beta_2 \mathbb{E}_w[v^w_{t-1}] + (1 - \beta_2)(\hat{g}^w_t \odot \hat{g}^w_t)$ \COMMENT{AllReduce $v$}
         \ELSE
-            \STATE $v^m_t \gets \beta_2 v^m_{t-1} + (1 - \beta_2)(\hat{g}^m_t \odot \hat{g}^m_t)$
+            \STATE $v^w_t \gets \beta_2 v^w_{t-1} + (1 - \beta_2)(\hat{g}^w_t \odot \hat{g}^w_t)$ \COMMENT{local EMA}
         \ENDIF
         \IF{$t \bmod K_m = 0$}
-            \STATE $m^m_t \gets \beta_1 \mathbb{E}_m[m^m_{t-1}] + (1 - \beta_1) \frac{\hat{g}^m_t}{\max\{\sqrt{v^m_{t-1}}, \epsilon\}}$
+            \STATE $m^w_t \gets \beta_1 \mathbb{E}_w[m^w_{t-1}] + (1 - \beta_1) \dfrac{\hat{g}^w_t}{\max\bigl\{\sqrt{v^w_{t-1}},\, \epsilon\bigr\}}$ \COMMENT{AllReduce $m$}
         \ELSE
-            \STATE $m^m_t \gets \beta_1 m^m_{t-1} + (1 - \beta_1) \frac{\hat{g}^m_t}{\max\{\sqrt{v^m_{t-1}}, \epsilon\}}$ \COMMENT{ADOPT update}
+            \STATE $m^w_t \gets \beta_1 m^w_{t-1} + (1 - \beta_1) \dfrac{\hat{g}^w_t}{\max\bigl\{\sqrt{v^w_{t-1}},\, \epsilon\bigr\}}$ \COMMENT{local ADOPT}
         \ENDIF
-        \STATE $d^m_t \gets \eta_t m^m_t$
+        \STATE $d^w_t \gets \eta_t\, m^w_t$ \COMMENT{ADOPT step (no per-coord preconditioning)}
         \IF{$t \bmod K_x = 0$}
-            \STATE $x^m_{t+1} \gets \mathbb{E}_m[x^m_t] - d^m_t$
+            \STATE $x^w_{t+1} \gets \mathbb{E}_w[x^w_t] - d^w_t$ \COMMENT{AllReduce parameters}
         \ELSE
-            \STATE $x^m_{t+1} \gets x^m_t - d^m_t$
+            \STATE $x^w_{t+1} \gets x^w_t - d^w_t$ \COMMENT{local step}
         \ENDIF
     \ENDFOR
 \ENDFOR
 \end{algorithmic}
 \end{algorithm}
 
+\paragraph{Note on ADOPT's update order.}
+ADOPT~\citep{taniguchi2024adoptmodifiedadamconverge} differs from Adam in that the
+second moment $v^w_t$ is updated \emph{before} the first moment $m^w_t$,
+and the preconditioner uses $v^w_{t-1}$ (the previous step) rather than $v^w_t$.
+In the FAUST setting this ordering is preserved per-worker: the tiered sync
+gates on $K_v$ and $K_m$ are independent, so $v$ can synchronize at a different
+cadence than $m$ without violating ADOPT's convergence requirements.
+However, the divisibility chain $K_x \mid K_m \mid K_v$ ensures that whenever
+parameters sync ($K_x$ boundary), both moments have already been averaged,
+preventing stale-preconditioner drift.
+
 %=============================================================================
-% Appendix D: Convergence Analysis of DES-LOC-SGDM
-% Claude-12 (M276-M300): PDF pages 32-35 (SGDM proof + D.1 Adam extension start)
+% Unified analysis of the SP--DP collective interaction
 %=============================================================================
+
+\paragraph{SP--DP collective orthogonality and ZeRO-1 composition.}
+A central invariant of both Algorithms~\ref{alg:desloc_adam} and~\ref{alg:desloc_adopt}
+is the \textbf{collective orthogonality constraint}: the intra-step SP collectives
+($\mathcal{A}_P$ and $\mathcal{A}_P^{-1}$, Phase~1--2) and the inter-step DP
+collectives ($\mathbb{E}_m$, Phase~4) must never overlap on the same gradient tensor.
+This is enforced by the Phase~3 fence: at every $K_x$-boundary step,
+$\textsc{WaitAll}(\mathcal{H})$ blocks until all $|\mathcal{H}| = L$ asynchronous
+All-to-All handles have retired, guaranteeing that the gradient $\hat{g}^m_t$ entering
+Phase~4 is fully sequence-reduced.
+
+When ZeRO-1 optimizer-state partitioning is active, the $\mathbb{E}_m[\cdot]$ operator
+decomposes into three sub-operations:
+\begin{equation}
+\mathbb{E}_m[s] \;\longmapsto\; \texttt{reduce\_scatter}(s) \;\to\; \text{per-shard update} \;\to\; \texttt{all\_gather}(\hat{s}),
+\label{eq:zero1_decomposition}
+\end{equation}
+where the tier gate ($t \bmod K_j = 0$) controls whether
+\texttt{reduce\_scatter} fires or the gradient is accumulated locally.
+In the Neuron\_SP implementation, each gradient bucket is tagged with its structural
+tier (embedding/norm $\to$ $K_x$, attention projections $\to$ $K_u$, FFN $\to$ $K_v$),
+and the bucket's AllReduce is dispatched only when the period $K_j$ divides $t$.
+The SP fence (Phase~3) serializes \emph{before} the first bucket dispatch, so the
+ZeRO-1 \texttt{reduce\_scatter} never observes a partially SP-reduced gradient shard.
+
+AutoSP interacts with this decomposition through a critical engine-level routing decision:
+whereas DeepCompile normally bypasses the standard \texttt{allreduce\_gradients} path
+(handling gradient reduction within the compiled graph), AutoSP explicitly re-enables it
+so that the DP AllReduce runs \emph{outside} the compiled graph on the already SP-reduced
+gradient. This ensures that the SP $\mathcal{A}_P^{-1}$ and the DP $\mathbb{E}_m$ execute
+in strictly sequential phases, composing correctly even when the DP reduction is
+bucket-pipelined.
+
+\paragraph{SP gradient identity and convergence invariance.}
+Under the Ulysses head-splitting strategy realized by AutoSP's
+\textsc{InsertA2A} pass, each SP rank $p$ on device $m$ computes a partial
+gradient $\tilde{g}^{m,p}_t$ from its local sequence chunk.
+The backward All-to-All---implemented via the registered autograd hook
+\texttt{\_all\_to\_all\_backward} which swaps \texttt{scatter\_idx} and
+\texttt{gather\_idx}---produces the aggregate:
+\begin{equation}
+g^m_t = \sum_{p=0}^{P-1} \tilde{g}^{m,p}_t = \nabla_x \mathcal{L}(x^m_t;\, \xi^m_t),
+\label{eq:sp_gradient_identity}
+\end{equation}
+which is \emph{identical} to the gradient from a non-SP forward-backward pass on the
+full sequence $S$.
+This identity holds exactly for linear layers and attention (where the All-to-All
+implements a head-dimension repartitioning), and up to floating-point reduction
+order for LayerNorm parameters (which require an additional AllReduce of partial
+gradients within the SP group, implemented in the backward hook).
+Since~\eqref{eq:sp_gradient_identity} is independent of $P$, the optimizer loops
+in Algorithms~\ref{alg:desloc_adam} and~\ref{alg:desloc_adopt} operate on the same
+$g^m_t$ for any SP degree, and the convergence analyses in
+Sections~\ref{sec:sgdm_proof} and~\ref{sec:adam_extension} apply without modification.
+
+\paragraph{Selective activation checkpointing under SP.}
+AutoSP introduces a compile-time heuristic for activation checkpointing that
+is SP-aware: the \textsc{LongContextCheckpointing} pass modifies PyTorch's
+\texttt{solve\_min\_cut} partitioner to distinguish between operations whose
+activation memory scales quadratically with sequence length (SDPA, convolutions)
+and those that scale linearly (matmul, FFN).
+Specifically, the heuristic bans recomputation of any operation whose output
+tensor has a second dimension $\geq 4096$, as these are the attention
+activations that dominate memory under long-context SP training.
+Matmul and related linear operations are \emph{not} banned, allowing the
+partitioner to recompute them during the backward pass at negligible cost.
+This selective strategy provides $O(L \cdot S)$ memory savings compared to
+full activation storage, while adding only $O(L \cdot d_{\text{model}})$ recomputation
+cost---a ratio that improves as the sequence length $S$ grows, making it
+particularly effective in the SP regime where $S$ is large by design.
 
 %=============================================================================
 % Appendix D: Convergence Analysis of Neuron_SP-SGDM
 %=============================================================================
+
 \section{Convergence Analysis of FAUST-SGDM (in expectation bounds)}
 \label{sec:sgdm_proof}
 
@@ -1752,11 +1740,42 @@ Throughout this section we use the following notation.
 There are $M$ replicas, indexed by $m \in \{1, \ldots, M\}$.
 Each replica $m$ maintains a local copy of the parameters $x_t^m \in \mathbb{R}^d$
 and a local momentum buffer $u_t^m \in \mathbb{R}^d$.
-The SP degree $P$ does not appear in the analysis because, as established in
-Section~\ref{sec:convergence}, the compile-time sequence-parallel graph rewrite
-produces an unbiased gradient $g_t^m = \nabla F_m(x_t^m;\,\xi_t^m)$ with the
-same variance bound $\sigma^2$ as in the non-SP case. All bounds therefore hold
-for any $P \geq 1$.
+We denote the SP degree by $P \geq 1$.
+
+\paragraph{Why $P$ does not affect the convergence rate (and where it helps).}
+The compile-time sequence-parallel graph rewrite (AutoSP,
+Section~\ref{sec:FAUST}) inserts $4L$ All-to-All collectives that
+partition the sequence dimension across $P$ ranks within each
+replica. By the SP gradient identity~\eqref{eq:sp_gradient_identity},
+the gradient entering the optimizer is
+$g_t^m = \sum_{p=0}^{P-1} \tilde{g}_t^{m,p} = \nabla F_m(x_t^m;\,\xi_t^m)$,
+identical to the non-SP case.
+The stochastic variance bound therefore satisfies
+\begin{equation}
+\mathbb{E}\bigl\|g_t^m - \nabla f_m(x_t^m)\bigr\|^2 \;\leq\; \sigma^2
+\label{eq:sp_variance_invariance}
+\end{equation}
+with the \emph{same} constant $\sigma^2$ for any $P \geq 1$, and the entire
+proof chain below is $P$-independent.
+
+However, $P$ does improve the \emph{per-coordinate} gradient variance for the
+$d_{\text{attn}} = 4NH$ attention-layer coordinates.
+By the SP variance reduction~\eqref{eq:sp_var_reduction}, the
+per-coordinate variance on these coordinates is $\sigma_j^2/P$ instead of
+$\sigma_j^2$. This motivates the SP-tightened clipping bound
+$\rho_{\text{eff}} = \rho/\sqrt{P}$ used in
+Algorithm~\ref{alg:desloc_adam} (Phase~2), which reduces the drift
+contribution from attention parameters by a factor of $1/\sqrt{P}$---a
+tighter constant that refines the bound~\eqref{eq:drift_u_sp}
+without changing the overall convergence \emph{order}.
+
+The collective orthogonality constraint (Phase~3 fence in
+Algorithm~\ref{alg:desloc_adam}) ensures that the gradient $g_t^m$
+is fully sequence-reduced before any data-parallel synchronization
+($\mathbb{E}_m$) fires. This is critical: if the fence were absent,
+the DP AllReduce would average partially-reduced SP gradients across
+replicas, violating the unbiasedness assumption that undergirds
+the entire analysis.
 
 The complete algorithm is given below.
 
@@ -2425,14 +2444,20 @@ $p_u = 1/K_u$ and the momentum decay $\beta$. It is
 \begin{enumerate}
 \item The gradient $g_t^m$ entering the optimizer is already
   sequence-reduced by the backward All-to-All (Section~\ref{sec:appendix_c}).
-  It satisfies $\mathbb{E}[g_t^m] = \nabla f_m(x_t^m)$ and
+  By the SP gradient identity~\eqref{eq:sp_gradient_identity},
+  it satisfies $\mathbb{E}[g_t^m] = \nabla f_m(x_t^m)$ and
   $\mathbb{E}\|g_t^m - \nabla f_m(x_t^m)\|^2 \leq \sigma^2$
-  with the \emph{same} constants as in the non-SP case.
+  with the \emph{same} constants as in the non-SP case---this
+  is precisely the variance invariance~\eqref{eq:sp_variance_invariance}.
 \item The synchronization operator $\mathbb{E}_m[\cdot]$ averages
   over the $M$ data-parallel replicas, not over the $P$ SP ranks
   within a replica. The SP ranks collaborate to produce a single
   gradient per replica; the desynced averaging then operates on
   these replica-level gradients.
+  The collective orthogonality constraint (Phase~3 fence in
+  Algorithm~\ref{alg:desloc_adam}) guarantees that this separation
+  holds at every step: no DP AllReduce fires until all SP A2A
+  handles have retired.
 \item Consequently, every term in the proof chain
   \eqref{eq:I_final}--\eqref{eq:final_rate}
   is unaffected by $P$: the variance bound $\sigma^2/M$, the
@@ -2443,6 +2468,29 @@ The SP decomposition affects only the \emph{wall-clock cost per step}
 (Section~\ref{sec:wallclock_bandwidth}), not the optimization trajectory
 or convergence rate.
 
+\paragraph{Corollary (SP-tightened constant for attention parameters).}
+While the convergence \emph{order} is $P$-independent, the
+\emph{constant} inside the bound can be refined for the $d_{\text{attn}}$
+attention-layer coordinates.
+By the SP variance reduction~\eqref{eq:sp_var_reduction} and the
+SP-tightened clipping bound $\rho_{\text{eff}} = \rho/\sqrt{P}$
+(Algorithm~\ref{alg:desloc_adam}, Phase~2), the drift
+bounds~\eqref{eq:drift_u_sp}--\eqref{eq:drift_v_sp} yield a
+refined per-coordinate contribution:
+\begin{equation}
+\psi_{\text{attn}}
+\;\leq\; \frac{\psi}{P},
+\label{eq:psi_attn_sp}
+\end{equation}
+where $\psi_{\text{attn}}$ is the drift coefficient restricted to the
+attention-layer coordinates. Since these coordinates constitute a fraction
+$d_{\text{attn}}/d$ of the total, the overall drift decomposes as
+$\psi_{\text{eff}} = (1 - d_{\text{attn}}/d)\,\psi + (d_{\text{attn}}/d)\,\psi/P$,
+yielding a tighter constant for the final rate~\eqref{eq:final_rate}
+without changing its order.
+At $P = 2$ (our default SP degree), attention-layer drift is halved;
+at $P = 4$, it is quartered.
+
 \paragraph{Remark (tiered gradient buckets and $\psi$).}
 In the FAUST implementation, the uniform periods $(K_x, K_u)$ in the
 SGDM analysis correspond to the \emph{fastest} tier's periods. The slower
@@ -2452,6 +2500,22 @@ $\mathcal{O}((1+\psi)/T)$ term but do not change its order. The key
 structural insight is that $\psi = \mathcal{O}(1/p_x^2)$: parameter
 synchronization frequency dominates the bound, while momentum
 synchronization enters only linearly.
+
+\paragraph{Remark (role of the collective fence in the proof).}
+The entire proof chain assumes that $g_t^m = \nabla F_m(x_t^m;\, \xi_t^m)$
+is an unbiased estimator of $\nabla f_m(x_t^m)$. This holds only if the
+SP backward All-to-All has fully completed before $g_t^m$ is used.
+In the absence of the Phase~3 fence, a race condition arises:
+the DP AllReduce $\mathbb{E}_m[\cdot]$ could average
+\emph{partially-reduced} gradients $\hat{g}_t^m$ where some SP ranks have
+completed their All-to-All but others have not.
+In this scenario, $\hat{g}_t^m \neq g_t^m$ and the unbiasedness
+assumption $\mathbb{E}[\hat{g}_t^m] = \nabla f_m(x_t^m)$ is violated,
+invalidating Step~3a (the variance decomposition~\eqref{eq:var_decomp})
+and propagating through the entire bound.
+The fence guarantees that this never occurs: it is not merely an
+engineering convenience but a \emph{necessary condition for correctness}
+of the convergence proof.
 
 %=============================================================================
 % D.1 Extension to Adam optimizer
@@ -3204,13 +3268,33 @@ summation technique (swapping the order of summation and bounding the
 geometric series), the total over $t = 0, \ldots, T-1$ is $\mathcal{O}(1)$,
 confirming condition~\eqref{eq:adam_cond_A3}.
 
-\paragraph{Remark (SP invariance).}
+\paragraph{Remark (SP invariance and SP-tightened constants for Adam).}
 As in the SGDM analysis, the three conditions
 \eqref{eq:adam_cond_A1}--\eqref{eq:adam_cond_A3} depend only on the
 synchronization probabilities $p_x, p_u, p_v$, the decay factors
 $\beta_1, \beta_2$, and the gradient bound $G$. None involves the SP
 degree $P$. The convergence rate of FAUST-Adam is therefore
-$P$-independent.
+$P$-independent in order.
+
+The SP-tightened constant refinement from the SGDM analysis
+(Eq.~\eqref{eq:psi_attn_sp}) extends naturally to Adam's two-moment
+structure. Since the first-moment drift~\eqref{eq:drift_u_sp} and the
+second-moment drift~\eqref{eq:drift_v_sp} both carry the $1/\sqrt{P}$
+factor for attention-layer coordinates, the combined drift contribution
+from these coordinates to the preconditioned step
+$d_t^m = \eta_t \Gamma_t u_t^m$ (where $\Gamma_t = \mathrm{diag}(v_t + \lambda^2)^{-1/2}$)
+is also reduced by $1/\sqrt{P}$.
+Concretely, the $\tilde{g}$-drift bound~\eqref{eq:adam_gtilde_bound} for the
+attention-layer coordinates $j \in \mathcal{I}_{\text{attn}}$ becomes
+$\|\tilde{g}_{t,j} - \tilde{g}_{t-1,j}\|_\infty \leq 2G\,\gamma_{\max}/\sqrt{P}$,
+tightening the spectral-norm bound on $\Gamma_t - \Gamma_{t-1}$ and
+yielding a sharper constant in~\eqref{eq:adam_AMSGrad_telescope}.
+
+The collective orthogonality constraint (fence at $K_x$-boundaries) is
+again a necessary condition: for Adam, the second moment $v_t^m$ depends
+on $g_t^m \odot g_t^m$, so a partially-reduced gradient would corrupt both
+moments simultaneously, making the preconditioner $\Gamma_t$ inconsistent
+across replicas and invalidating the spectral bound chain.
 
 %=============================================================================
 % D.2 Key Lemmas
@@ -3681,8 +3765,10 @@ Combining~\eqref{eq:lem4_three_terms} with the three bounds:
 
 
 
+
 %=============================================================================
 %=============================================================================
+
 \section{Derivation of the Momentum Drift Bounds (\texorpdfstring{\eqref{eq:drift_u}}{Eq. drift-u} and \texorpdfstring{\eqref{eq:drift_v}}{Eq. drift-v})}
 \label{sec:drift_derivation}
 %=============================================================================
@@ -3694,10 +3780,23 @@ These bounds underpin FAUST's tiered synchronization schedule: they
 quantify how far a locally maintained optimizer state can deviate from
 the cross-replica average over $K$ unsynchronized steps.
 
-The SP degree $P$ does not enter this derivation. The gradient
-$g_t$ is already sequence-reduced by the backward All-to-All and
+\paragraph{Base case and SP extension.}
+We first derive the bounds for the \emph{uniform} clipping radius $\rho$,
+which holds for all $d$ coordinates and any SP degree $P \geq 1$
+(Sections~\ref{sec:drift_first} and~\ref{sec:drift_second}).
+The SP degree $P$ does not enter these base-case derivations because the gradient
+$g_t$ is already sequence-reduced by the backward All-to-All
+(SP gradient identity~\eqref{eq:sp_gradient_identity}) and
 satisfies the same per-coordinate clipping bound $|[g_t]_i| \leq \rho$
 as in the non-SP case (Section~\ref{sec:appendix_c}).
+
+We then derive the \emph{SP-tightened} variants
+(Section~\ref{sec:drift_sp_tightened}), which exploit the fact that for
+the $d_{\text{attn}} = 4NLH$ attention-layer coordinates, the SP
+All-to-All reduces the effective per-coordinate gradient variance by a factor
+of $P$ (Eq.~\eqref{eq:sp_var_reduction}), yielding a tighter effective
+clipping radius $\rho_{\text{eff}} = \rho/\sqrt{P}$ and correspondingly
+sharper drift bounds.
 
 \paragraph{Clipping assumption.}
 Throughout this section, we assume per-coordinate gradient clipping:
@@ -4119,9 +4218,114 @@ comfortably below the half-life ratios
 $\tau_{0.5}(\beta_2)/\tau_{0.5}(\beta_1) \approx 6931/13.5 \approx 513$
 for ADOPT.
 
+%-----------------------------------------------------------------------------
+\subsection{SP-Tightened Drift Bounds for Attention-Layer Parameters}
+\label{sec:drift_sp_tightened}
+%-----------------------------------------------------------------------------
+
+We now derive the SP-tightened variants of the drift bounds for the
+$d_{\text{attn}}$ attention-layer coordinates. These are the coordinates
+$j \in \mathcal{I}_{\text{attn}}$ corresponding to the $Q, K, V$, and $O$
+projection parameters across all $L$ transformer layers, which are precisely
+the parameters whose gradients flow through the All-to-All collectives
+inserted by the AutoSP compiler.
+
+\paragraph{SP-effective clipping radius.}
+By the SP variance reduction~\eqref{eq:sp_var_reduction}, the per-coordinate
+gradient variance for $j \in \mathcal{I}_{\text{attn}}$ satisfies
+$\operatorname{Var}[g_{t,j}^{(\text{SP})}] \leq \sigma_j^2 / P$.
+When per-coordinate gradient clipping is applied after the backward All-to-All
+(Phase~2 of Algorithm~\ref{alg:desloc_adam}), the effective clipping radius
+on these coordinates is:
+\begin{equation}
+\rho_j^{\text{eff}} \;=\; \frac{\rho}{\sqrt{P}}, \qquad j \in \mathcal{I}_{\text{attn}}.
+\label{eq:rho_eff_def}
+\end{equation}
+For the remaining $d - d_{\text{attn}}$ coordinates (embeddings, FFN, norms),
+whose gradients are not redistributed by the SP All-to-All, the original
+clipping radius $\rho$ applies unchanged.
+
+\paragraph{SP-tightened first-moment drift.}
+Substituting $\rho_j^{\text{eff}}$ into the base
+bound~\eqref{eq:drift_u_qed} for coordinates $j \in \mathcal{I}_{\text{attn}}$:
+\begin{equation}
+\bigl|[u_{t+K} - u_t]_j\bigr|
+\;\leq\; \frac{2\rho}{\sqrt{P}}\,(1 - \beta_1^K),
+\qquad j \in \mathcal{I}_{\text{attn}}.
+\label{eq:drift_u_sp_derived}
+\end{equation}
+This recovers exactly the SP-tightened bound~\eqref{eq:drift_u_sp}
+stated in Section~\ref{sec:FAUST}.
+
+\paragraph{SP-tightened second-moment drift.}
+Similarly, substituting $(\rho_j^{\text{eff}})^2 = \rho^2/P$ into the
+base bound~\eqref{eq:drift_v_qed}:
+\begin{equation}
+\bigl|[v_{t+K} - v_t]_j\bigr|
+\;\leq\; \frac{2\rho^2}{P}\,(1 - \beta_2^K),
+\qquad j \in \mathcal{I}_{\text{attn}}.
+\label{eq:drift_v_sp_derived}
+\end{equation}
+Note the stronger $1/P$ factor (vs.\ $1/\sqrt{P}$ for the first moment):
+the second moment involves the \emph{square} of the gradient, so the
+variance reduction enters quadratically.
+
+\paragraph{Composite drift decomposition.}
+For any optimizer state $s_t$ (first or second moment), the full
+$\ell_\infty$ drift decomposes into attention and non-attention components:
+\begin{equation}
+\|s_{t+K} - s_t\|_\infty
+\;=\; \max\!\Bigl(
+  \max_{j \in \mathcal{I}_{\text{attn}}} |[s_{t+K} - s_t]_j|,\;\;
+  \max_{j \notin \mathcal{I}_{\text{attn}}} |[s_{t+K} - s_t]_j|
+\Bigr).
+\label{eq:drift_composite}
+\end{equation}
+Since FAUST's structural tiering assigns attention-layer parameters to the
+$K_u$-tier (which synchronizes less frequently than the $K_x$-tier for
+embedding/norm parameters), the relevant comparison is:
+\begin{itemize}
+\item \emph{Embedding/norm parameters} ($K_x$-tier): drift bounded by
+      $2\rho(1-\beta_1^{K_x})$, synchronized every $K_x$ steps.
+\item \emph{Attention parameters} ($K_u$-tier): drift bounded by
+      $2\rho(1-\beta_1^{K_u})/\sqrt{P}$, synchronized every $K_u = 3K_x$ steps.
+\item \emph{FFN parameters} ($K_v$-tier): drift bounded by
+      $2\rho(1-\beta_1^{K_v})$, synchronized every $K_v = 6K_x$ steps.
+\end{itemize}
+
+\paragraph{SP-aware schedule optimization.}
+The SP-tightened bounds open a new degree of freedom: since the
+attention-layer drift is reduced by $1/\sqrt{P}$, the synchronization
+period $K_u$ for the attention tier can be \emph{increased} by a factor
+of up to $\sqrt{P}$ while maintaining the same worst-case drift as in
+the non-SP case. Formally, setting $K_u^{\text{SP}} = K_u \cdot \sqrt{P}$
+yields:
+\begin{equation}
+\frac{2\rho}{\sqrt{P}}\,(1 - \beta_1^{K_u \sqrt{P}})
+\;\leq\; 2\rho\,(1 - \beta_1^{K_u}),
+\label{eq:sp_schedule_extension}
+\end{equation}
+which holds because $\beta_1^{K_u\sqrt{P}} \geq \beta_1^{K_u\cdot P}$
+for $\sqrt{P} \leq P$ and $\beta_1 \in (0,1)$.
+At $P = 2$, this allows extending the attention sync period by $\approx 41\%$
+($\sqrt{2} \approx 1.414$); at $P = 4$, by $100\%$.
+The corresponding reduction in inter-step DP communication volume for the
+attention-tier parameters is $1 - 1/\sqrt{P}$: a $29\%$ saving at $P = 2$
+and $50\%$ at $P = 4$, compounding with FAUST's base $170\times$
+communication reduction.
+
+For the second moment, the $1/P$ factor permits an even larger extension:
+$K_v^{\text{SP}} = K_v \cdot P$, i.e., the second-moment sync for attention
+parameters can be deferred by a full factor of $P$. In practice, this is
+bounded by numerical stability considerations (the preconditioner
+$1/\sqrt{v_t + \lambda^2}$ must remain accurate), but the theoretical
+headroom is substantial.
+
 
 %=============================================================================
 %=============================================================================
+
+
 \section{Wall-Clock Time Modeling}
 \label{sec:wallclock_model}
 %=============================================================================
@@ -4131,6 +4335,9 @@ training time under FAUST and compares it against DDP, Local Adam,
 and FAVG+OPT. The model decomposes per-step cost into four physically
 distinct components and shows that the compile-time SP overhead cancels
 when computing relative communication savings.
+We then extend the analysis to incorporate the SP-tightened sync
+periods derived in Section~\ref{sec:drift_sp_tightened}, which yield
+improved communication factors that compound with the base reduction.
 
 \subsection{Estimating Total Wall-Clock Time}
 \label{sec:wallclock_bandwidth}
@@ -4496,7 +4703,7 @@ stated in the main text. The reduction is \emph{exact} and independent of
 $K$, $M$, and the model size---it depends only on the ratios
 $K_u/K_x = 3$ and $K_v/K_x = 6$.
 
-\paragraph{Remark (SP cancellation).}
+\paragraph{Remark (SP cancellation in the base analysis).}
 The SP All-to-All cost $t_{\text{SP}}$ does not appear in any of the
 communication ratios computed above. This is because it executes at every
 step under all methods (DDP, Local Adam, FAUST) and therefore cancels
@@ -4505,6 +4712,117 @@ wall-clock time, not the \emph{relative} communication savings. This
 orthogonality is a key design property of FAUST: the compile-time
 spatial decomposition (SP) and the runtime temporal gating (desynced
 schedule) compose without interference.
+
+However, SP \emph{does} indirectly reduce communication by enabling longer
+sync periods for attention-tier parameters, as we quantify next.
+
+%-----------------------------------------------------------------------------
+\subsection{SP-Tightened Communication Factors}
+\label{sec:wallclock_sp_tightened}
+%-----------------------------------------------------------------------------
+
+The base analysis above uses fixed sync periods $K_u = 3K_x$ and
+$K_v = 6K_x$ that are $P$-independent. However, the SP-tightened drift
+bounds (Section~\ref{sec:drift_sp_tightened}) show that the attention-tier
+parameters tolerate longer sync periods: $K_u^{\text{SP}} = K_u\sqrt{P}$
+for the first moment and $K_v^{\text{SP}} = K_v \cdot P$ for the second
+moment (Eq.~\eqref{eq:sp_schedule_extension}), while maintaining the
+same worst-case drift as the non-SP case.
+
+\paragraph{SP-aware FAUST communication volume.}
+Under the SP-tightened schedule, the total communication volume
+becomes tier-dependent. We decompose the parameter space into
+attention-layer parameters (fraction $\phi = d_{\text{attn}}/d$) and
+non-attention parameters (fraction $1 - \phi$):
+\begin{align}
+\text{Vol}_{\text{NSP}}^{\text{SP}}
+&= T\,t_c \biggl[
+  \frac{1}{K_x}
+  + (1-\phi)\frac{1}{K_u}
+  + \phi\frac{1}{K_u\sqrt{P}}
+  + (1-\phi)\frac{1}{K_v}
+  + \phi\frac{1}{K_v \cdot P}
+\biggr].
+\label{eq:vol_nsp_sp}
+\end{align}
+The first term (parameter sync) is unchanged---all parameters sync at
+$K_x$ regardless of SP. The momentum terms split: non-attention
+coordinates use the base periods, while attention coordinates use the
+extended SP-tightened periods.
+
+\paragraph{SP-aware FAUST vs.\ DDP.}
+For typical Transformer architectures, attention projection parameters
+constitute approximately $\phi \approx 1/3$ of total parameters (the
+$Q, K, V, O$ projections across all layers). Substituting $K_x = 256$,
+$K_u = 768$, $K_v = 1536$, and $P = 2$:
+\begin{align}
+\text{Vol}_{\text{NSP}}^{\text{SP}}
+&= T\,t_c \biggl[
+  \frac{1}{256}
+  + \frac{2}{3} \cdot \frac{1}{768}
+  + \frac{1}{3} \cdot \frac{1}{768\sqrt{2}}
+  + \frac{2}{3} \cdot \frac{1}{1536}
+  + \frac{1}{3} \cdot \frac{1}{3072}
+\biggr]
+\notag \\
+&= T\,t_c \biggl[
+  3.906 \times 10^{-3}
+  + 8.681 \times 10^{-4}
+  + 3.069 \times 10^{-4}
+  + 4.340 \times 10^{-4}
+  + 1.085 \times 10^{-4}
+\biggr]
+\notag \\
+&= T\,t_c \cdot 5.624 \times 10^{-3}.
+\label{eq:vol_nsp_sp_concrete}
+\end{align}
+
+The base (non-SP-tightened) volume from~\eqref{eq:vol_nsp} is:
+\begin{equation}
+\text{Vol}_{\text{NSP}}^{\text{base}}
+= T\,t_c \cdot \frac{3}{512}
+= T\,t_c \cdot 5.859 \times 10^{-3}.
+\label{eq:vol_nsp_base_recall}
+\end{equation}
+
+The SP-tightened volume is $5.624/5.859 = 96.0\%$ of the base,
+yielding an additional $4.0\%$ communication reduction on top of the
+$512\times$ base factor. At $P = 4$:
+\begin{align}
+\text{Vol}_{\text{NSP}}^{\text{SP}}\bigl|_{P=4}
+&= T\,t_c \biggl[
+  \frac{1}{256}
+  + \frac{2}{3} \cdot \frac{1}{768}
+  + \frac{1}{3} \cdot \frac{1}{1536}
+  + \frac{2}{3} \cdot \frac{1}{1536}
+  + \frac{1}{3} \cdot \frac{1}{6144}
+\biggr]
+\notag \\
+&= T\,t_c \cdot 5.371 \times 10^{-3},
+\label{eq:vol_nsp_sp_p4}
+\end{align}
+which is $91.7\%$ of the base---an $8.3\%$ additional reduction, or equivalently
+a combined $558\times$ communication reduction vs.\ DDP (up from $512\times$).
+
+\paragraph{SP-aware FAUST vs.\ Local Adam.}
+For the comparison with Local Adam (which does not benefit from
+SP-tightened periods since it synchronizes all states uniformly),
+the SP-tightened FAUST volume ratio becomes:
+\begin{align}
+\frac{\text{Vol}_{\text{NSP}}^{\text{SP}}}{\text{Vol}_{\text{LA}}}
+&= \frac{5.624 \times 10^{-3}}{3/256}
+= \frac{5.624 \times 10^{-3}}{1.172 \times 10^{-2}}
+= 0.480
+\label{eq:nsp_sp_vs_la}
+\end{align}
+at $P = 2$, i.e., a $2.08\times$ reduction (vs.\ the base $2\times$).
+At $P = 4$, this becomes $0.458\times$, or a $2.18\times$ reduction.
+
+The incremental improvement from SP-tightened periods is modest
+($4$--$8\%$) because the parameter sync ($K_x$-tier) dominates the
+total volume and is not SP-dependent. The improvement is more
+pronounced for momentum-heavy optimizers like ADOPT, where $u$ and $v$
+together constitute $2/3$ of the total communication.
 
 \subsection{Throughput Comparison}
 
@@ -4550,11 +4868,9 @@ confirming that the additional momentum synchronization rounds at
 $K_u = 3K_x$ and $K_v = 6K_x$ contribute negligible overhead.
 \end{itemize}
 
-
 %=============================================================================
 
 
-%=============================================================================
 \section{Checkpointing vs.\ Periodic State Synchronization}
 \label{sec:checkpoint}
 %=============================================================================
@@ -4633,6 +4949,30 @@ boundaries. A newly joining replica receives the current global state at
 the next synchronization event (at most $K_v$ steps away), after which
 its local states are within the bounded-drift envelope.
 
+\paragraph{SP-tightened staleness for attention parameters.}
+For the $d_{\text{attn}}$ attention-layer coordinates, the SP-tightened
+drift bounds (Section~\ref{sec:drift_sp_tightened}) yield even sharper
+staleness guarantees under FAUST:
+\begin{alignat}{2}
+&\text{First moment (attn):}\quad&
+\max_t\;\bigl|[u_t - u_t^m]_j\bigr|
+&\leq \frac{2\rho}{\sqrt{P}}\,(1 - \beta_1^{K_u}),
+\label{eq:ckpt_nsp_u_sp} \\[4pt]
+&\text{Second moment (attn):}\quad&
+\max_t\;\bigl|[v_t - v_t^m]_j\bigr|
+&\leq \frac{2\rho^2}{P}\,(1 - \beta_2^{K_v}).
+\label{eq:ckpt_nsp_v_sp}
+\end{alignat}
+At $P = 2$, the attention first-moment staleness is reduced by $29\%$
+and the second-moment staleness by $50\%$ compared to checkpointing,
+which cannot exploit this SP structure at all (checkpoint states are
+stored monolithically without tier or SP awareness).
+Moreover, the SP-aware schedule extension
+(Section~\ref{sec:drift_sp_tightened}) allows using longer sync periods
+$K_u^{\text{SP}} = K_u\sqrt{P}$ for attention parameters while maintaining
+the same drift envelope---widening the gap between FAUST's bounded
+staleness and checkpointing's unbounded staleness.
+
 %-----------------------------------------------------------------------------
 \subsection{Reason 2: No convergence guarantees from checkpoint averaging}
 \label{sec:checkpoint_convergence}
@@ -4683,7 +5023,7 @@ eliminate. Moreover, the checkpoint write must be \emph{synchronous}
 barrier that defeats the purpose of asynchronous local training.
 
 %-----------------------------------------------------------------------------
-\subsection{Reason 3: SP group atomicity}
+\subsection{Reason 3: SP group atomicity and compiler state}
 \label{sec:checkpoint_sp}
 %-----------------------------------------------------------------------------
 
@@ -4693,20 +5033,34 @@ layers. The SP All-to-All collectives require \emph{all $P$ ranks} to
 participate: if any SP rank within a replica fails, the replica's
 forward pass is incomplete and produces no valid gradient.
 
-This has two consequences for checkpoint-based recovery:
+This has three consequences for checkpoint-based recovery:
 
 \paragraph{(a) The recovery unit is the full SP group, not a single rank.}
 Checkpointing at the individual-rank level is insufficient. When a rank
 fails, the entire SP group must be restored from the checkpoint, which
-requires $P$ coordinated reads from persistent storage. The compile-time
-graph rewrite has specialized the computation graph for the specific
-SP degree $P$: the sharded sequence dimension, the head-splitting
-All-to-All placement, and the activation shapes are all baked into the
-compiled graph. Restoring a single rank into a running SP group requires
-re-compiling the graph or maintaining $P$ identical copies of the
-compiled artifacts---neither of which is free.
+requires $P$ coordinated reads from persistent storage. The AutoSP compile-time
+graph rewrite (commit \texttt{5efb24a}) has specialized the computation graph for the specific
+SP degree $P$: the \textsc{ShardSeqDim} pass rewrites all symbolic
+sequence-dimension consumers to use $S/P$; the \textsc{InsertA2A} pass
+places $4L$ \texttt{torch.ops.autosp.all\_to\_all} nodes at fixed
+positions in the FX graph; and the \textsc{PropagateShapes} pass bakes
+the sharded activation shapes into every intermediate node's metadata.
+Restoring a single rank into a running SP group requires re-executing
+the full 7-pass compilation pipeline or maintaining $P$ copies of
+the compiled graph artifacts---neither of which is free.
 
-\paragraph{(b) FAUST's periodic synchronization naturally handles
+\paragraph{(b) Checkpoint state lacks SP-tier metadata.}
+FAUST's runtime maintains per-parameter tier annotations
+(\texttt{param.\_desloc\_tier}) and per-bucket tier tags that govern
+communication scheduling. These annotations are set during
+\texttt{init\_desloc\_torch\_extensions} and are not part of the
+standard PyTorch state dict. A checkpoint-restored replica would need
+to re-derive the tier map from the model structure, introducing a
+potential inconsistency if the model architecture has been modified
+between the checkpoint and recovery point (e.g., layer freezing,
+adapter insertion).
+
+\paragraph{(c) FAUST's periodic synchronization naturally handles
 SP group recovery.}
 When a failed SP group is replaced, the new group initializes its
 parameters and optimizer states from the cross-replica average at the
@@ -4715,6 +5069,11 @@ All-to-All within the new group executes correctly because all $P$ ranks
 start from the same state and process the same compiled graph. No
 checkpoint read is required---the recovery state is obtained from the
 \emph{live} replicas via the existing AllReduce infrastructure.
+The tier annotations are restored via the same
+\texttt{register\_param\_tiers} call that initializes any new replica,
+and the SP-tightened sync periods (Section~\ref{sec:drift_sp_tightened})
+ensure that attention-tier states converge within $K_u^{\text{SP}}$
+steps.
 
 This is the key advantage of periodic synchronization over checkpointing
 in the SP setting: the recovery mechanism uses the same communication
@@ -4727,9 +5086,11 @@ requiring an additional I/O subsystem.
 %-----------------------------------------------------------------------------
 
 FAUST's collective fence mechanism
-(Section~\ref{sec:neuronsp}) ensures that all pending SP
-All-to-All handles are retired before the data-parallel gradient
-reduction begins. This fence is essential for correctness: without it,
+(Phase~3 of Algorithm~\ref{alg:desloc_adam}; implemented as
+\texttt{\_desloc\_fence\_all\_pending} with a configurable timeout)
+ensures that all pending SP All-to-All handles in the set $\mathcal{H}$
+are retired before the data-parallel gradient reduction begins.
+This fence enforces the collective orthogonality constraint: without it,
 a data-parallel AllReduce could overlap with an in-flight SP All-to-All,
 causing communicator contention or, on shared-interconnect clusters,
 data corruption.
@@ -4738,15 +5099,28 @@ Checkpoint-based recovery introduces a subtle interaction with the fence.
 When a replica restores from a checkpoint, its SP All-to-All handles are
 in an undefined state: the restored ranks have no knowledge of which
 collectives were in flight at the time of failure. The fence mechanism
-assumes that all ranks within an SP group have consistent handle state;
-a checkpoint-restored rank violates this assumption.
+assumes that all ranks within an SP group have consistent handle state
+($\mathcal{H}$ is identical across ranks); a checkpoint-restored rank
+violates this assumption because its $\mathcal{H} = \emptyset$ while
+the surviving ranks may have $|\mathcal{H}| = L$ pending handles.
+
+\paragraph{Consequences for gradient correctness.}
+If a checkpoint-restored rank participates in a DP AllReduce while other
+ranks still have pending A2A handles, the gradient $g_t^m$ entering
+the AllReduce may be partially SP-reduced on some ranks and fully
+reduced on others. This violates the SP gradient
+identity~\eqref{eq:sp_gradient_identity} and the variance
+invariance~\eqref{eq:sp_variance_invariance}, invalidating the
+convergence analysis (specifically, the unbiasedness assumption in
+the variance decomposition~\eqref{eq:var_decomp}).
 
 Under FAUST's periodic synchronization, this problem does not arise:
 the synchronization boundary is a \emph{global barrier} at which all
-pending handles are guaranteed to have completed (the fence fires
-\emph{before} the AllReduce). A newly joining replica enters the training
-loop at the post-fence state, where no SP handles are pending and the
-communicator is in a clean state.
+pending handles are guaranteed to have completed (the fence
+$\textsc{WaitAll}(\mathcal{H})$ fires \emph{before} the AllReduce).
+A newly joining replica enters the training loop at the post-fence state,
+where $\mathcal{H} = \emptyset$ for all ranks and the communicator is in
+a clean state.
 
 %-----------------------------------------------------------------------------
 \subsection{Summary}
@@ -4754,17 +5128,42 @@ communicator is in a clean state.
 %-----------------------------------------------------------------------------
 
 \begin{center}
+\resizebox{\linewidth}{!}{%
 \begin{tabular}{lcc}
 \toprule
 \textbf{Property} & \textbf{Checkpointing} & \textbf{FAUST sync} \\
 \midrule
-Bounded state drift & Only if $\Delta t \leq K_v$ & Always (\eqref{eq:ckpt_nsp_u},~\eqref{eq:ckpt_nsp_v}) \\
-Convergence guarantee & None & Theorem~\ref{thm:sgdm} \\
-SP group recovery & Requires $P$ coordinated reads & Via existing AllReduce \\
-Fence consistency & Undefined handle state & Clean post-fence entry \\
-I/O overhead & $T/K_v \cdot t_{\text{write}}$ & Zero (uses AllReduce) \\
+Bounded state drift
+& Only if $\Delta t \leq K_v$
+& Always (\eqref{eq:ckpt_nsp_u},~\eqref{eq:ckpt_nsp_v}) \\
+
+SP-tightened attn drift
+& N/A (monolithic)
+& $1/\sqrt{P}$ first, $1/P$ second
+(\eqref{eq:ckpt_nsp_u_sp},~\eqref{eq:ckpt_nsp_v_sp}) \\
+
+Convergence guarantee
+& None
+& Theorem~\ref{thm:sgdm} \\
+
+SP group recovery
+& $P$ coordinated reads + recompile
+& Via existing AllReduce \\
+
+Tier metadata
+& Not preserved
+& Restored via \texttt{register\_param\_tiers} \\
+
+Fence consistency
+& $\mathcal{H}$ undefined
+& $\mathcal{H} = \emptyset$ (clean post-fence) \\
+
+I/O overhead
+& $T/K_v \cdot t_{\text{write}}$
+& Zero (uses AllReduce) \\
 \bottomrule
-\end{tabular}
+\end{tabular}%
+}
 \end{center}
 
 \paragraph{Practical recommendation.}
@@ -4776,6 +5175,16 @@ checkpointing protects against catastrophic failures that affect all
 replicas simultaneously, while periodic synchronization protects against
 individual replica failures and ensures bounded optimizer-state drift
 for convergence.
+
+The SP-tightened analysis strengthens this recommendation: under SP,
+FAUST's periodic synchronization gains an \emph{additional} advantage
+that checkpointing fundamentally cannot match---the structural
+awareness that attention-layer states drift more slowly (by $1/\sqrt{P}$
+for the first moment and $1/P$ for the second). Checkpointing, being a
+monolithic state-dump mechanism, cannot exploit this per-tier structure
+and must therefore checkpoint all states at the frequency dictated by
+the \emph{fastest-drifting} component, negating the communication savings
+that FAUST's tiered schedule provides.
 
 
 
@@ -4791,7 +5200,7 @@ experimental results. All technical contributions are the original work of the a
 %=============================================================================
 % NeurIPS Paper Checklist (included inline per committee requirements)
 %=============================================================================
-
+\newpage
 \section*{NeurIPS Paper Checklist}
 
 \begin{enumerate}
